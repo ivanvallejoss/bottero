@@ -19,12 +19,12 @@ var ErrInvalid = errors.New("invalid configuration")
 type Config struct {
 	// keywords maps a normalized keyword to its reply.
 	keywords map[string]string
-	// defaultReply answers a group tag without a keyword. Unused until the
-	// groups capability.
+	// defaultReply answers a group tag without a keyword; "" means silence.
 	defaultReply string
-	// allowedPeople holds phone numbers, digits only.
+	// allowedPeople holds phone numbers, digits only. Applies to private
+	// chats; in enabled groups the bot answers any member who tags it.
 	allowedPeople map[string]bool
-	// enabledGroups holds group JIDs. Unused until the groups capability.
+	// enabledGroups holds the JIDs of the groups where the bot acts.
 	enabledGroups map[string]bool
 }
 
@@ -106,6 +106,18 @@ func (c *Config) Reply(text string) (keyword, reply string, ok bool) {
 // IsAllowedPerson reports whether phone (digits only) is on the allowed list.
 func (c *Config) IsAllowedPerson(phone string) bool {
 	return phone != "" && c.allowedPeople[phone]
+}
+
+// IsEnabledGroup reports whether the group JID (e.g. "1203...@g.us") is on
+// the enabled list.
+func (c *Config) IsEnabledGroup(chat string) bool {
+	return c.enabledGroups[chat]
+}
+
+// DefaultReply is the reply to a group tag without a keyword. "" means the
+// bot stays silent.
+func (c *Config) DefaultReply() string {
+	return c.defaultReply
 }
 
 // Summary describes the loaded configuration for the startup log line,
