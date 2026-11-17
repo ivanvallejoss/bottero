@@ -2,7 +2,8 @@
 //
 // The log is the main output of the exploration stage. It records what
 // whatsmeow delivers, with identifiers exactly as they arrive (phone-number
-// JID or LID). This version logs metadata only, never message content.
+// JID or LID). It logs metadata for every message; the text is added only
+// for the messages the includeText filter accepts.
 package eventlog
 
 import (
@@ -22,6 +23,10 @@ type Logger struct {
 	log    *slog.Logger
 	device *store.Device
 
+	// includeText decides whether a message line also carries the text.
+	// nil means never.
+	includeText func(*events.Message) bool
+
 	// offlineSync is true between OfflineSyncPreview and OfflineSyncCompleted,
 	// while the server delivers the events missed during downtime. whatsmeow
 	// handles incoming nodes in order, so messages in between are the
@@ -31,8 +36,10 @@ type Logger struct {
 
 // New returns a Logger that writes through base. device is the bot's own
 // device store, used to log the bot's identifiers on every connection.
-func New(base *slog.Logger, device *store.Device) *Logger {
-	return &Logger{log: base.With("component", "event"), device: device}
+// includeText decides which messages are logged with their text; nil means
+// metadata only.
+func New(base *slog.Logger, device *store.Device, includeText func(*events.Message) bool) *Logger {
+	return &Logger{log: base.With("component", "event"), device: device, includeText: includeText}
 }
 
 // Handle logs a single event. Its signature matches whatsmeow.EventHandler,
@@ -135,7 +142,20 @@ func (l *Logger) message(name string, evt *events.Message) {
 	if mentioned := contextInfo(evt.Message).GetMentionedJID(); len(mentioned) > 0 {
 		attrs = append(attrs, "mentions", strings.Join(mentioned, ","))
 	}
+	if l.includeText != nil && l.includeText(evt) {
+		if text := Text(evt.Message); text != "" {
+			attrs = append(attrs, "text", text)
+		}
+	}
 	l.log.Info("event", attrs...)
+}
+
+// Text returns the text of a plain or extended text message, or "".
+func Text(msg *waE2E.Message) string {
+	if text := msg.GetConversation(); text != "" {
+		return text
+	}
+	return msg.GetExtendedTextMessage().GetText()
 }
 
 // undecryptable logs a message whatsmeow received but could not decrypt.

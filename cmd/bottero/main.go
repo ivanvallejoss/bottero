@@ -1,11 +1,12 @@
 // Command bottero is a WhatsApp bot built on whatsmeow. In this stage it is an
 // exploration tool: it pairs with a dedicated number, keeps the session on
-// disk and logs every event whatsmeow delivers.
+// disk, logs every event whatsmeow delivers and answers keywords with fixed
+// replies.
 //
 // Usage:
 //
 //	bottero pair -phone 549XXXXXXXXXX   link the number using a pairing code
-//	bottero run                          connect and log events until stopped
+//	bottero run                          connect, log events and answer until stopped
 package main
 
 import (
@@ -19,19 +20,26 @@ import (
 	"runtime/debug"
 	"syscall"
 
+	"github.com/ivanvallejoss/bottero/internal/config"
+	"github.com/ivanvallejoss/bottero/internal/dedup"
 	"github.com/ivanvallejoss/bottero/internal/eventlog"
 	"github.com/ivanvallejoss/bottero/internal/session"
 )
 
-const defaultDataDir = "/var/lib/bottero"
+const (
+	defaultDataDir = "/var/lib/bottero"
+	defaultConfig  = "/etc/bottero/config.json"
+)
 
 // Exit codes. The systemd unit restarts the service on failure, except on
-// exitSessionEnded (RestartPreventExitStatus=3): without a valid session, or
-// after WhatsApp ended it, restarting only hits the server again.
+// exitSessionEnded and exitConfig (RestartPreventExitStatus=3 4): without a
+// valid session, after WhatsApp ended it, or with a broken configuration,
+// restarting does not help.
 const (
 	exitError        = 1
 	exitUsage        = 2
 	exitSessionEnded = 3
+	exitConfig       = 4
 )
 
 func main() {
@@ -63,21 +71,25 @@ func main() {
 	if err != nil {
 		logger.Error("exiting with error", "component", "bottero", "err", err)
 		stop()
-		if errors.Is(err, session.ErrSessionEnded) || errors.Is(err, session.ErrNotPaired) {
+		switch {
+		case errors.Is(err, session.ErrSessionEnded), errors.Is(err, session.ErrNotPaired):
 			os.Exit(exitSessionEnded)
+		case errors.Is(err, config.ErrInvalid):
+			os.Exit(exitConfig)
+		default:
+			os.Exit(exitError)
 		}
-		os.Exit(exitError)
 	}
 }
 
 func usage() {
 	fmt.Fprint(os.Stderr, `Usage:
   bottero pair -phone 549XXXXXXXXXX [-data-dir DIR]
-  bottero run [-data-dir DIR]
+  bottero run [-config FILE] [-data-dir DIR]
 
 Commands:
   pair   link the dedicated number as a companion device using a pairing code
-  run    connect with the stored session and log every whatsmeow event
+  run    connect with the stored session, log every event and answer keywords
 `)
 }
 
@@ -114,10 +126,24 @@ func pairCmd(ctx context.Context, logger *slog.Logger, args []string) error {
 
 func runCmd(ctx context.Context, logger *slog.Logger, args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	configPath := fs.String("config", defaultConfig, "configuration file (keywords, allowed people, enabled groups)")
 	dataDir := fs.String("data-dir", defaultDataDir, "directory that holds the SQLite databases")
 	_ = fs.Parse(args)
 
-	logger.Info("starting", "component", "bottero", "data_dir", *dataDir, "whatsmeow", whatsmeowVersion())
+	logger.Info("starting", "component", "bottero", "data_dir", *dataDir, "config", *configPath, "whatsmeow", whatsmeowVersion())
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	keywords, people, groups := cfg.Summary()
+	logger.Info("configuration loaded", "component", "bottero", "keywords", keywords, "allowed_people", people, "enabled_groups", groups)
+
+	answered, err := dedup.Open(ctx, *dataDir)
+	if err != nil {
+		return err
+	}
+	defer answered.Close()
 
 	waLogger := eventlog.WhatsmeowLogger(logger)
 	container, err := session.OpenStore(ctx, *dataDir, waLogger.Sub("Database"))
@@ -126,7 +152,7 @@ func runCmd(ctx context.Context, logger *slog.Logger, args []string) error {
 	}
 	defer container.Close()
 
-	return session.Run(ctx, container, waLogger, logger)
+	return session.Run(ctx, container, waLogger, logger, cfg, answered)
 }
 
 // whatsmeowVersion reports the whatsmeow module version compiled into the

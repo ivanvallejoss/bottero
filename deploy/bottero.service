@@ -10,19 +10,21 @@ After=network-online.target
 Type=simple
 User=bottero
 Group=bottero
-ExecStart=/usr/local/bin/bottero run -data-dir /var/lib/bottero
+ExecStart=/usr/local/bin/bottero run -config /etc/bottero/config.json -data-dir /var/lib/bottero
 
-# /var/lib/bottero holds the whatsmeow session. systemd creates it if needed
-# and makes the service user its owner.
+# /var/lib/bottero holds the whatsmeow session (session.db) and the record of
+# answered messages (state.db). systemd creates it if needed and makes the
+# service user its owner.
 StateDirectory=bottero
 StateDirectoryMode=0700
 
-# Restart after failures, but not after exit code 3: the session is gone or
-# WhatsApp ended it (logged out, ban, replaced, outdated client). Restarting
-# would not help; the journal shows the reason.
+# Restart after failures, but not after exit code 3 (the session is gone or
+# WhatsApp ended it: logged out, ban, replaced, outdated client) or 4 (the
+# configuration file is missing or invalid). Restarting would not fix either;
+# the journal shows the reason.
 Restart=on-failure
 RestartSec=10s
-RestartPreventExitStatus=3
+RestartPreventExitStatus=3 4
 
 # Basic sandbox: no privilege escalation, read-only system, no access to
 # home directories, private /tmp. The only writable path is StateDirectory.

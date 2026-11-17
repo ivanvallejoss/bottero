@@ -6,5 +6,8 @@
 *.db-wal
 *.db-shm
 
+# Real configuration (lives in /etc/bottero on the homelab; contains phone numbers)
+/config.json
+
 # Claude working files
 .claude/
