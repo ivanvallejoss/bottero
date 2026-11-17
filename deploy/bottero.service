@@ -1,0 +1,35 @@
+[Unit]
+Description=bottero WhatsApp bot (exploration stage)
+Documentation=https://github.com/ivanvallejoss/bottero
+# Start once the network is configured. The bot also retries on its own if
+# the first connection fails (the Wi-Fi may take longer to come back).
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=bottero
+Group=bottero
+ExecStart=/usr/local/bin/bottero run -data-dir /var/lib/bottero
+
+# /var/lib/bottero holds the whatsmeow session. systemd creates it if needed
+# and makes the service user its owner.
+StateDirectory=bottero
+StateDirectoryMode=0700
+
+# Restart after failures, but not after exit code 3: the session is gone or
+# WhatsApp ended it (logged out, ban, replaced, outdated client). Restarting
+# would not help; the journal shows the reason.
+Restart=on-failure
+RestartSec=10s
+RestartPreventExitStatus=3
+
+# Basic sandbox: no privilege escalation, read-only system, no access to
+# home directories, private /tmp. The only writable path is StateDirectory.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -4,7 +4,7 @@ Bot de WhatsApp en Go construido sobre [whatsmeow](https://github.com/tulir/what
 
 ## Estado
 
-Capacidad actual: emparejamiento por código, sesión guardada en disco y registro de eventos. Todavía no responde mensajes.
+Capacidades actuales: emparejamiento por código, sesión guardada en disco, registro de eventos y servicio de systemd con arranque automático y reconexión. Todavía no responde mensajes.
 
 ## Compilar (en la notebook)
 
@@ -16,45 +16,82 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o bot
 
 Sin cgo el binario es estático y no depende de la glibc del homelab. `-s -w` quita la tabla de símbolos y la información de depuración para achicarlo; los stack traces de un panic siguen mostrando funciones y líneas.
 
-## Instalar en el homelab
+## Instalar en el homelab (primera vez)
+
+Desde la notebook:
 
 ```sh
-scp bottero hp-g4-vallejos:~/
-ssh hp-g4-vallejos
-sudo install -d -o ivan -g ivan -m 700 /var/lib/bottero
+scp bottero deploy/bottero.service ivan@hp-g4-vallejos:~/
 ```
 
-`/var/lib/bottero` guarda la base de la sesión (`session.db`). Se puede cambiar con `-data-dir`.
+En el homelab:
+
+```sh
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin bottero
+sudo install -m 755 ~/bottero /usr/local/bin/bottero
+sudo install -m 644 ~/bottero.service /etc/systemd/system/bottero.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now bottero
+```
+
+El servicio corre como el usuario de sistema `bottero`. `/var/lib/bottero` guarda la base de la sesión (`session.db`) y es solo de ese usuario: systemd la crea si no existe y le cambia el dueño si ya existía.
+
+## Actualizar el binario
+
+```sh
+# notebook
+scp bottero ivan@hp-g4-vallejos:~/
+# homelab
+sudo install -m 755 ~/bottero /usr/local/bin/bottero
+sudo systemctl restart bottero
+```
+
+`install` reemplaza el archivo aunque el servicio esté corriendo. Si cambia `deploy/bottero.service`, se copia igual a `/etc/systemd/system/` y se corre `sudo systemctl daemon-reload` antes de reiniciar.
 
 ## Emparejar
 
-Antes de emparejar, cerrá desde el teléfono cualquier sesión vinculada anterior del número dedicado.
+El servicio no empareja: si no hay sesión, termina y systemd no lo reinicia. Antes de emparejar, cerrá desde el teléfono cualquier sesión vinculada anterior del número dedicado.
 
 ```sh
-./bottero pair -phone 549XXXXXXXXXX
+sudo systemctl stop bottero
+sudo -u bottero /usr/local/bin/bottero pair -phone 549XXXXXXXXXX
+sudo systemctl start bottero
 ```
 
-El número va con código de país, 9, código de área y número, sin `+` y sin `15`. El comando imprime un código de 8 caracteres. En el teléfono del número dedicado: Dispositivos vinculados → Vincular un dispositivo → Vincular con número de teléfono, y escribís el código. Dura unos dos minutos. Cuando el teléfono lo acepta, el comando espera la primera conexión y termina.
+El número va con código de país, 9, código de área y número, sin `+` y sin `15`. El comando imprime un código de 8 caracteres. En el teléfono del número dedicado: Dispositivos vinculados → Vincular un dispositivo → Vincular con número de teléfono, y escribís el código. Dura unos dos minutos. Cuando el teléfono lo acepta, el comando termina. La primera conexión, que sube las claves de cifrado iniciales, la hace el servicio al arrancar y puede tardar unos segundos.
 
-Si ya hay una sesión guardada, `pair` no hace nada. Para volver a emparejar: desvincular el dispositivo desde el teléfono y borrar `session.db` (y sus archivos `-wal` y `-shm`).
+Si ya hay una sesión guardada, `pair` no hace nada. Para volver a emparejar: desvincular el dispositivo desde el teléfono, detener el servicio y borrar la base (`sudo rm /var/lib/bottero/session.db*`).
 
-## Correr
+## Correr a mano
+
+Para correrlo fuera del servicio, primero hay que detener el servicio: dos procesos con la misma sesión hacen que WhatsApp corte uno de los dos.
 
 ```sh
-./bottero run
+sudo systemctl stop bottero
+sudo -u bottero /usr/local/bin/bottero run
 ```
 
-Se detiene con Ctrl-C. Al volver a correrlo reconecta con la sesión guardada, sin emparejar. Si WhatsApp cierra la sesión de forma definitiva (desvinculado desde el teléfono, baneo, otro proceso con la misma sesión, cliente desactualizado), el bot lo registra y termina con error.
+## Reinicios y reconexión
+
+- Ante una caída de red, whatsmeow reconecta solo y espera 2 segundos más después de cada intento fallido. Si al arrancar no hay red, sigue intentando de la misma forma.
+- Si el proceso termina con error, systemd lo reinicia a los 10 segundos.
+- Código de salida 3: no hay sesión, o WhatsApp la cerró de forma definitiva (desvinculado desde el teléfono, baneo temporal, otro proceso con la misma sesión, cliente desactualizado). systemd no lo reinicia, porque reintentar no lo arregla; el motivo queda en el journal.
 
 ## Registro de eventos
 
-El bot escribe en stdout una línea por evento, en formato `clave=valor`. El campo `component` separa tres fuentes:
+El bot escribe en stdout una línea por evento, en formato `clave=valor`. Como servicio, esa salida va al journal del sistema. El campo `component` separa tres fuentes:
 
 - `component=event`: cada evento que entrega whatsmeow.
 - `component=whatsmeow`: logs internos de la biblioteca, con `module` indicando la parte (Client, Socket, Database...).
 - `component=bottero`: mensajes del propio bot (arranque, apagado, errores). La línea de arranque muestra la versión de whatsmeow compilada.
 
-Para ver solo los eventos: `./bottero run | grep component=event`.
+```sh
+journalctl -u bottero -o cat -f                         # en vivo
+journalctl -u bottero -o cat -b                         # desde el último arranque de la máquina
+journalctl -u bottero -o cat | grep component=event     # solo los eventos
+```
+
+`-o cat` muestra las líneas tal como las escribe el bot, sin el prefijo del journal. El journal sobrevive a los reinicios si existe `/var/log/journal`.
 
 En esta versión el registro guarda solo metadatos, nunca el contenido de los mensajes.
 

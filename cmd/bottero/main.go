@@ -25,12 +25,21 @@ import (
 
 const defaultDataDir = "/var/lib/bottero"
 
+// Exit codes. The systemd unit restarts the service on failure, except on
+// exitSessionEnded (RestartPreventExitStatus=3): without a valid session, or
+// after WhatsApp ended it, restarting only hits the server again.
+const (
+	exitError        = 1
+	exitUsage        = 2
+	exitSessionEnded = 3
+)
+
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	if len(os.Args) < 2 {
 		usage()
-		os.Exit(2)
+		os.Exit(exitUsage)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -48,13 +57,16 @@ func main() {
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", os.Args[1])
 		usage()
-		os.Exit(2)
+		os.Exit(exitUsage)
 	}
 
 	if err != nil {
 		logger.Error("exiting with error", "component", "bottero", "err", err)
 		stop()
-		os.Exit(1)
+		if errors.Is(err, session.ErrSessionEnded) || errors.Is(err, session.ErrNotPaired) {
+			os.Exit(exitSessionEnded)
+		}
+		os.Exit(exitError)
 	}
 }
 
