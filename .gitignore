@@ -1,0 +1,10 @@
+# Build output
+/bottero
+
+# Local session databases (never commit a WhatsApp session)
+*.db
+*.db-wal
+*.db-shm
+
+# Claude working files
+.claude/
