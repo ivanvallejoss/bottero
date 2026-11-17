@@ -65,6 +65,7 @@ func (r *replier) handle(rawEvt any) bool {
 		FromMe:  info.IsFromMe,
 		IsText:  evt.Message.GetConversation() != "" || evt.Message.GetExtendedTextMessage() != nil,
 		Text:    text,
+		Media:   mediaOf(evt.Message),
 		IsEdit:  evt.IsEdit || info.Edit != "",
 	}
 
@@ -84,6 +85,10 @@ func (r *replier) handle(rawEvt any) bool {
 
 	decision := r.responder.Decide(msg)
 	base := []any{"id", info.ID, "chat", info.Chat.String()}
+
+	if decision.Media != "" {
+		base = append(base, "media", string(decision.Media))
+	}
 
 	switch decision.Outcome {
 	case responder.Ignore:
@@ -112,7 +117,7 @@ func (r *replier) handle(rawEvt any) bool {
 	// clear whom it answers. In private chats it is plain text.
 	var out *waE2E.Message
 	if msg.Group {
-		out = quotedReply(decision.Reply, info, text)
+		out = quotedReply(decision.Reply, info, quotable(evt.Message, text))
 	} else {
 		reply := decision.Reply
 		out = &waE2E.Message{Conversation: &reply}
@@ -131,11 +136,51 @@ func (r *replier) handle(rawEvt any) bool {
 		return false
 	}
 
+	if decision.Outcome == responder.FileAck {
+		r.log.Info("decision", concat([]any{"outcome", "file_ack"}, base, how, []any{"reply_id", resp.ID})...)
+		return true
+	}
 	r.log.Info("decision", concat(
 		[]any{"outcome", "replied"}, base, how,
 		[]any{"keyword", decision.Keyword, "default_reply", decision.Default, "reply_id", resp.ID},
 	)...)
 	return true
+}
+
+// mediaOf describes an image or document by the metadata in the message,
+// or returns nil for any other kind of message.
+func mediaOf(msg *waE2E.Message) *responder.Media {
+	if img := msg.GetImageMessage(); img != nil {
+		return &responder.Media{
+			Kind:     responder.Image,
+			Mimetype: img.GetMimetype(),
+			Size:     img.GetFileLength(),
+			Width:    img.GetWidth(),
+			Height:   img.GetHeight(),
+		}
+	}
+	if doc := msg.GetDocumentMessage(); doc != nil {
+		return &responder.Media{
+			Kind:     responder.Document,
+			Mimetype: doc.GetMimetype(),
+			Size:     doc.GetFileLength(),
+			Name:     doc.GetFileName(),
+			Pages:    doc.GetPageCount(),
+		}
+	}
+	return nil
+}
+
+// quotable is the part of a message a reply quotes: the image or document
+// itself (so the quote shows it), or the text.
+func quotable(msg *waE2E.Message, text string) *waE2E.Message {
+	if img := msg.GetImageMessage(); img != nil {
+		return &waE2E.Message{ImageMessage: img}
+	}
+	if doc := msg.GetDocumentMessage(); doc != nil {
+		return &waE2E.Message{DocumentMessage: doc}
+	}
+	return &waE2E.Message{Conversation: &text}
 }
 
 // includeText is the event log's content filter: private messages from
@@ -174,10 +219,19 @@ func senderPhone(ctx context.Context, lids store.LIDStore, info types.MessageInf
 }
 
 // selfMention returns how the bot appears among the explicit mentions of a
-// text message: "lid", "pn", or "" if it is not mentioned. Only text
-// messages count; a tag in an image or file caption is handled separately.
+// text message or of an image or document caption: "lid", "pn", or "" if
+// it is not mentioned.
 func selfMention(device *store.Device, msg *waE2E.Message) string {
-	for _, raw := range msg.GetExtendedTextMessage().GetContextInfo().GetMentionedJID() {
+	var mentions []string
+	switch {
+	case msg.GetExtendedTextMessage() != nil:
+		mentions = msg.GetExtendedTextMessage().GetContextInfo().GetMentionedJID()
+	case msg.GetImageMessage() != nil:
+		mentions = msg.GetImageMessage().GetContextInfo().GetMentionedJID()
+	case msg.GetDocumentMessage() != nil:
+		mentions = msg.GetDocumentMessage().GetContextInfo().GetMentionedJID()
+	}
+	for _, raw := range mentions {
 		mentioned, err := types.ParseJID(raw)
 		if err != nil {
 			continue
@@ -202,7 +256,7 @@ func stripSelfMentions(text string, device *store.Device) string {
 }
 
 // quotedReply builds a text reply that quotes the message it answers.
-func quotedReply(reply string, info types.MessageInfo, quotedText string) *waE2E.Message {
+func quotedReply(reply string, info types.MessageInfo, quoted *waE2E.Message) *waE2E.Message {
 	id := info.ID
 	author := info.Sender.ToNonAD().String()
 	return &waE2E.Message{
@@ -211,7 +265,7 @@ func quotedReply(reply string, info types.MessageInfo, quotedText string) *waE2E
 			ContextInfo: &waE2E.ContextInfo{
 				StanzaID:      &id,
 				Participant:   &author,
-				QuotedMessage: &waE2E.Message{Conversation: &quotedText},
+				QuotedMessage: quoted,
 			},
 		},
 	}

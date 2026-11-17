@@ -154,12 +154,59 @@ func (l *Logger) message(name string, evt *events.Message) {
 			}
 		}
 	}
-	if l.includeText != nil && l.includeText(evt) {
+	content := l.includeText != nil && l.includeText(evt)
+	attrs = append(attrs, mediaAttrs(evt.Message, content)...)
+	if content {
 		if text := Text(evt.Message); text != "" {
 			attrs = append(attrs, "text", text)
 		}
 	}
 	l.log.Info("event", attrs...)
+}
+
+// mediaAttrs returns the metadata a media message carries, read from the
+// message itself (nothing is downloaded). The caption and the file name
+// count as content and are added only when content is true. The file's
+// encryption key and download path are never logged.
+func mediaAttrs(msg *waE2E.Message, content bool) []any {
+	var attrs []any
+	caption := ""
+	switch {
+	case msg.GetImageMessage() != nil:
+		m := msg.GetImageMessage()
+		caption = m.GetCaption()
+		attrs = append(attrs, "mime", m.GetMimetype(), "size", m.GetFileLength(),
+			"width", m.GetWidth(), "height", m.GetHeight())
+	case msg.GetDocumentMessage() != nil:
+		m := msg.GetDocumentMessage()
+		caption = m.GetCaption()
+		attrs = append(attrs, "mime", m.GetMimetype(), "size", m.GetFileLength(), "pages", m.GetPageCount())
+		if content && m.GetFileName() != "" {
+			attrs = append(attrs, "file_name", m.GetFileName())
+		}
+	case msg.GetPtvMessage() != nil, msg.GetVideoMessage() != nil:
+		m := msg.GetVideoMessage()
+		if m == nil {
+			m = msg.GetPtvMessage()
+		}
+		caption = m.GetCaption()
+		attrs = append(attrs, "mime", m.GetMimetype(), "size", m.GetFileLength(),
+			"seconds", m.GetSeconds(), "width", m.GetWidth(), "height", m.GetHeight())
+	case msg.GetAudioMessage() != nil:
+		m := msg.GetAudioMessage()
+		attrs = append(attrs, "mime", m.GetMimetype(), "size", m.GetFileLength(),
+			"seconds", m.GetSeconds(), "voice_note", m.GetPTT())
+	case msg.GetStickerMessage() != nil:
+		m := msg.GetStickerMessage()
+		attrs = append(attrs, "mime", m.GetMimetype(), "size", m.GetFileLength(), "animated", m.GetIsAnimated())
+	default:
+		return nil
+	}
+	attrs = append(attrs, "has_caption", caption != "")
+	if content && caption != "" {
+		attrs = append(attrs, "caption", caption)
+	}
+	return attrs
 }
 
 // SelfIdentity reports whether j is one of the bot's own identities,

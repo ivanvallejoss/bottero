@@ -1,6 +1,7 @@
 // Package config loads the bot's configuration: keywords and their fixed
-// replies, the people the bot answers in private chats and the groups where
-// it is enabled. The file is read once at startup; changes apply on restart.
+// replies, the confirmations for images and documents, the people the bot
+// answers in private chats and the groups where it is enabled. The file is
+// read once at startup; changes apply on restart.
 package config
 
 import (
@@ -8,7 +9,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
+)
+
+// Placeholders each confirmation template may use. The responder fills them
+// in with the metadata the message carries.
+var (
+	ImagePlaceholders    = []string{"mimetype", "size", "width", "height"}
+	DocumentPlaceholders = []string{"mimetype", "size", "name", "pages"}
 )
 
 // ErrInvalid wraps every error Load returns. A missing or invalid file is not
@@ -26,6 +35,10 @@ type Config struct {
 	allowedPeople map[string]bool
 	// enabledGroups holds the JIDs of the groups where the bot acts.
 	enabledGroups map[string]bool
+	// imageAck and documentAck are the confirmation templates; "" means the
+	// bot does not confirm that kind of file.
+	imageAck    string
+	documentAck string
 }
 
 // file mirrors the JSON layout. Unknown fields are rejected, so a typo in a
@@ -35,6 +48,8 @@ type file struct {
 	DefaultReply  string            `json:"default_reply"`
 	AllowedPeople []string          `json:"allowed_people"`
 	EnabledGroups []string          `json:"enabled_groups"`
+	ImageAck      string            `json:"image_ack"`
+	DocumentAck   string            `json:"document_ack"`
 }
 
 // Load reads and validates the configuration file at path.
@@ -57,6 +72,15 @@ func Load(path string) (*Config, error) {
 		defaultReply:  strings.TrimSpace(raw.DefaultReply),
 		allowedPeople: make(map[string]bool, len(raw.AllowedPeople)),
 		enabledGroups: make(map[string]bool, len(raw.EnabledGroups)),
+		imageAck:      strings.TrimSpace(raw.ImageAck),
+		documentAck:   strings.TrimSpace(raw.DocumentAck),
+	}
+
+	if err := checkPlaceholders("image_ack", cfg.imageAck, ImagePlaceholders); err != nil {
+		return nil, err
+	}
+	if err := checkPlaceholders("document_ack", cfg.documentAck, DocumentPlaceholders); err != nil {
+		return nil, err
 	}
 
 	for keyword, reply := range raw.Keywords {
@@ -118,6 +142,38 @@ func (c *Config) IsEnabledGroup(chat string) bool {
 // bot stays silent.
 func (c *Config) DefaultReply() string {
 	return c.defaultReply
+}
+
+// ImageAck is the confirmation template for images. "" means no confirmation.
+func (c *Config) ImageAck() string {
+	return c.imageAck
+}
+
+// DocumentAck is the confirmation template for documents. "" means no
+// confirmation.
+func (c *Config) DocumentAck() string {
+	return c.documentAck
+}
+
+var placeholderRE = regexp.MustCompile(`\{[^{}]*\}`)
+
+// checkPlaceholders rejects a template that uses a placeholder its kind
+// does not have, so a typo such as {mime} fails at startup.
+func checkPlaceholders(field, tmpl string, allowed []string) error {
+	for _, ph := range placeholderRE.FindAllString(tmpl, -1) {
+		name := strings.Trim(ph, "{}")
+		known := false
+		for _, a := range allowed {
+			if name == a {
+				known = true
+				break
+			}
+		}
+		if !known {
+			return fmt.Errorf("%w: %s: unknown placeholder %s (allowed: {%s})", ErrInvalid, field, ph, strings.Join(allowed, "}, {"))
+		}
+	}
+	return nil
 }
 
 // Summary describes the loaded configuration for the startup log line,

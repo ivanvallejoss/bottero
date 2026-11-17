@@ -4,7 +4,12 @@
 // replaced (for example by a language model) without touching the session.
 package responder
 
-import "github.com/ivanvallejoss/bottero/internal/config"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/ivanvallejoss/bottero/internal/config"
+)
 
 // Message is an incoming message reduced to what the decision needs.
 type Message struct {
@@ -23,25 +28,52 @@ type Message struct {
 	// Text is the message text. In groups, the bot's own mentions are
 	// already removed from it.
 	Text string
+	// Media is set for an image or a document.
+	Media *Media
 	// IsEdit is true for an edit of an earlier message.
 	IsEdit bool
-	// Mentioned is true when the message explicitly mentions the bot.
+	// Mentioned is true when the message (or the file's caption) explicitly
+	// mentions the bot.
 	Mentioned bool
+}
+
+// MediaKind is the kind of file the bot confirms.
+type MediaKind string
+
+const (
+	Image    MediaKind = "image"
+	Document MediaKind = "document"
+)
+
+// Media is an image or document described by the metadata the message
+// carries. The bot never downloads the file. Zero values mean the message
+// did not carry that field.
+type Media struct {
+	Kind     MediaKind
+	Mimetype string
+	Size     uint64
+	Width    uint32
+	Height   uint32
+	Name     string
+	Pages    uint32
 }
 
 // Outcome is the kind of decision.
 type Outcome int
 
 const (
-	// Ignore: not something the bot considers (own message, edit, no text,
-	// private sender not on the list, group message without a tag). Not
-	// logged as a decision.
+	// Ignore: not something the bot considers (own message, edit, private
+	// sender not on the list, group message without a tag, other kinds of
+	// messages). Not logged as a decision.
 	Ignore Outcome = iota
-	// NoMatch: the bot would answer, but no keyword matches and there is no
-	// reply to fall back on. Silence.
+	// NoMatch: the bot would answer, but there is nothing to answer with (no
+	// keyword matches and no default reply, or an empty confirmation
+	// template). Silence.
 	NoMatch
-	// Reply: answer with Decision.Reply.
+	// Reply: answer a text message with Decision.Reply.
 	Reply
+	// FileAck: confirm an image or document with Decision.Reply.
+	FileAck
 	// GroupNotEnabled: the bot was tagged in a group that is not on the
 	// enabled list. Silence.
 	GroupNotEnabled
@@ -50,11 +82,14 @@ const (
 // Decision is the result of Decide.
 type Decision struct {
 	Outcome Outcome
-	// Keyword is the normalized keyword that matched, or "" when Default.
+	// Keyword is the normalized keyword that matched (Reply only; "" when
+	// Default).
 	Keyword string
 	// Default is true when Reply is the configured default reply.
 	Default bool
-	// Reply is the text to send (Reply only).
+	// Media is the kind of file confirmed (FileAck, or NoMatch for a file).
+	Media MediaKind
+	// Reply is the text to send (Reply and FileAck).
 	Reply string
 }
 
@@ -70,7 +105,13 @@ func New(cfg *config.Config) *Responder {
 
 // Decide returns what to do with m.
 func (r *Responder) Decide(m Message) Decision {
-	if m.FromMe || m.IsEdit || !m.IsText {
+	if m.FromMe || m.IsEdit {
+		return Decision{Outcome: Ignore}
+	}
+	if m.Media != nil {
+		return r.decideFile(m)
+	}
+	if !m.IsText {
 		return Decision{Outcome: Ignore}
 	}
 	switch {
@@ -112,4 +153,79 @@ func (r *Responder) decideGroup(m Message) Decision {
 		return Decision{Outcome: Reply, Default: true, Reply: reply}
 	}
 	return Decision{Outcome: NoMatch}
+}
+
+// decideFile confirms an image or document with the same rules as text:
+// people on the allowed list in private chats, and a tag in the caption in
+// enabled groups. The caption is not matched against the keywords.
+func (r *Responder) decideFile(m Message) Decision {
+	switch {
+	case m.Private:
+		if !r.cfg.IsAllowedPerson(m.SenderPhone) {
+			return Decision{Outcome: Ignore}
+		}
+	case m.Group:
+		if !m.Mentioned {
+			return Decision{Outcome: Ignore}
+		}
+		if !r.cfg.IsEnabledGroup(m.Chat) {
+			return Decision{Outcome: GroupNotEnabled, Media: m.Media.Kind}
+		}
+	default:
+		return Decision{Outcome: Ignore}
+	}
+
+	tmpl := r.cfg.DocumentAck()
+	if m.Media.Kind == Image {
+		tmpl = r.cfg.ImageAck()
+	}
+	if tmpl == "" {
+		return Decision{Outcome: NoMatch, Media: m.Media.Kind}
+	}
+	return Decision{Outcome: FileAck, Media: m.Media.Kind, Reply: render(tmpl, *m.Media)}
+}
+
+// render fills a confirmation template with the file's metadata. A value
+// the message did not carry shows as "?". The configuration already
+// rejected placeholders the template's kind does not have.
+func render(tmpl string, m Media) string {
+	return strings.NewReplacer(
+		"{mimetype}", orUnknown(m.Mimetype),
+		"{size}", formatSize(m.Size),
+		"{width}", number(m.Width),
+		"{height}", number(m.Height),
+		"{name}", orUnknown(m.Name),
+		"{pages}", number(m.Pages),
+	).Replace(tmpl)
+}
+
+func orUnknown(s string) string {
+	if s == "" {
+		return "?"
+	}
+	return s
+}
+
+func number(n uint32) string {
+	if n == 0 {
+		return "?"
+	}
+	return fmt.Sprint(n)
+}
+
+// formatSize writes a byte count the way WhatsApp shows file sizes.
+func formatSize(n uint64) string {
+	const kb, mb, gb = 1024, 1024 * 1024, 1024 * 1024 * 1024
+	switch {
+	case n == 0:
+		return "?"
+	case n < kb:
+		return fmt.Sprintf("%d B", n)
+	case n < mb:
+		return fmt.Sprintf("%d KB", (n+kb/2)/kb)
+	case n < gb:
+		return fmt.Sprintf("%.1f MB", float64(n)/mb)
+	default:
+		return fmt.Sprintf("%.1f GB", float64(n)/gb)
+	}
 }
