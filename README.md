@@ -4,7 +4,7 @@ Bot de WhatsApp en Go construido sobre [whatsmeow](https://github.com/tulir/what
 
 ## Estado
 
-Capacidades actuales: emparejamiento por código, sesión guardada en disco, registro de eventos, servicio de systemd con arranque automático y reconexión, y respuestas fijas por palabra clave en chats privados y en grupos habilitados cuando etiquetan al bot, sin responder dos veces el mismo mensaje. Todavía no confirma archivos.
+Capacidades actuales: emparejamiento por código, sesión guardada en disco, registro de eventos, servicio de systemd con arranque automático y reconexión, y respuestas fijas por palabra clave en chats privados y en grupos habilitados cuando etiquetan al bot, confirmación de imágenes y documentos con sus metadatos, sin responder dos veces el mismo mensaje.
 
 ## Compilar (en la notebook)
 
@@ -59,6 +59,8 @@ Vive en `/etc/bottero/config.json` (dueño `root`, legible por el grupo `bottero
 {
   "keywords": { "hola": "¡Hola! ...", "ping": "pong" },
   "default_reply": "No entendí. ...",
+  "image_ack": "Recibí tu imagen: {mimetype}, {width}×{height}, {size}.",
+  "document_ack": "Recibí tu archivo {name}: {mimetype}, {size}.",
   "allowed_people": ["549XXXXXXXXXX"],
   "enabled_groups": []
 }
@@ -66,6 +68,7 @@ Vive en `/etc/bottero/config.json` (dueño `root`, legible por el grupo `bottero
 
 - `keywords`: palabra clave → respuesta fija. Un mensaje coincide si su texto completo es igual a la palabra clave, sin distinguir mayúsculas ni espacios en los extremos.
 - `default_reply`: respuesta cuando etiquetan al bot en un grupo habilitado y el resto del texto no es una palabra clave. Vacío significa silencio.
+- `image_ack`, `document_ack`: confirmación de una imagen o de un documento (cualquier archivo enviado como documento). Marcadores que el bot completa con los metadatos del mensaje: `{mimetype}` y `{size}` en las dos; `{width}` y `{height}` en `image_ack`; `{name}` y `{pages}` en `document_ack`. Un dato que el mensaje no trae aparece como `?`. Un marcador que no corresponde al tipo hace que la configuración se rechace al arrancar. Vacía significa que ese tipo no se confirma.
 - `allowed_people`: números a los que el bot responde en privado, en el mismo formato que `pair` (solo dígitos: 549 + código de área + número). El remitente se busca primero como número, después en el identificador alternativo (`sender_alt`) y por último en la relación LID → número que guarda whatsmeow.
 - `enabled_groups`: JID de los grupos donde el bot actúa (`...@g.us`). El JID de un grupo sale del registro: es el `chat` de cualquier mensaje de ese grupo.
 
@@ -78,6 +81,7 @@ En ningún caso responde a mensajes del propio número, ediciones ni mensajes qu
 - **Privados:** responde si el remitente está en `allowed_people` y el texto completo coincide con una palabra clave. Responde con texto plano, sin citar.
 - **Grupos:** responde solo si el mensaje etiqueta al bot con una mención explícita (`@`) y el grupo está en `enabled_groups`. Responde a cualquier miembro, sin pasar por `allowed_people`. Saca del texto las menciones del bot (con su LID y con su número) y compara el resto con las palabras clave; si no coincide, responde con `default_reply`, o se queda en silencio si está vacío. La respuesta cita el mensaje que lo etiquetó. Citar un mensaje del bot sin `@` no cuenta como etiqueta.
 - **Grupos no habilitados:** silencio total, aunque lo etiqueten.
+- **Imágenes y documentos:** se confirman con `image_ack` o `document_ack` y las mismas reglas: en privado, a personas de `allowed_people`; en grupos habilitados, cuando el pie etiqueta al bot (y la confirmación cita el archivo). El pie no se compara con las palabras clave. El bot no descarga el archivo: los metadatos vienen en el propio mensaje. Video, audio, notas de voz y stickers solo se registran.
 
 Cada mensaje respondido queda registrado por su id en `state.db`:
 
@@ -140,13 +144,14 @@ El registro guarda metadatos de todos los mensajes. El texto (campo `text`) se a
 
 ### Decisiones (`component=responder`)
 
-Solo para mensajes privados de texto de personas de la lista y para mensajes de grupo que etiquetan al bot. Los mensajes de grupo sin etiqueta no generan línea de decisión. El campo `outcome` dice qué pasó:
+Solo para mensajes privados de texto, imágenes o documentos de personas de la lista y para mensajes de grupo que etiquetan al bot. Los mensajes de grupo sin etiqueta no generan línea de decisión. El campo `outcome` dice qué pasó:
 
 | `outcome` | Qué significa |
 |---|---|
 | `replied` | Respondió. Incluye `keyword` (vacío si usó la respuesta por defecto), `default_reply` y `reply_id`, el id del mensaje enviado. En privados, `matched_via` dice por qué identificador se reconoció al remitente (`sender`, `sender_alt` o `lid_map`); en grupos, `mentioned_as` dice con cuál identidad del bot llegó la mención (`lid` o `pn`). |
 | `no_match` | El texto no coincide con ninguna palabra clave (y, en grupos, `default_reply` está vacío). Silencio. |
 | `group_not_enabled` | Etiquetaron al bot en un grupo que no está en `enabled_groups`. Silencio. |
+| `file_ack` | Confirmó una imagen o un documento. `media` dice cuál (`image` o `document`); incluye `reply_id`. Si la plantilla de ese tipo está vacía, la decisión es `no_match` con `media`. |
 | `duplicate` | El mensaje ya se había respondido; es una reentrega. Silencio. |
 | `send_failed` | El envío falló. Se reintenta en la próxima entrega del mensaje. |
 | `dedup_error`, `release_error` | Error de la base `state.db`. |
@@ -172,6 +177,13 @@ Solo para mensajes privados de texto de personas de la lista y para mensajes de 
 | `mentions` | JID mencionados, tal como llegan. |
 | `quoted_id`, `quoted_from` | Si el mensaje cita a otro (una respuesta): id y autor del mensaje citado, tal como llegan. |
 | `quoted_bot` | Presente si el mensaje citado es del bot: `lid` o `pn`, según la forma en que llegó el autor. |
+| `mime`, `size` | En imágenes, documentos, video, audio y stickers: tipo de archivo y tamaño en bytes, tal como vienen en el mensaje. |
+| `width`, `height` | Imágenes y video. |
+| `pages` | Documentos (0 si el mensaje no lo trae). |
+| `seconds`, `voice_note` | Duración de video y audio; `voice_note` indica una nota de voz. |
+| `animated` | Stickers. |
+| `has_caption` | Si el archivo vino con pie. |
+| `caption`, `file_name` | Pie y nombre del archivo. Cuentan como contenido: solo donde también se registra `text`. |
 | `text` | Texto del mensaje. Solo en privados de personas de `allowed_people` y en grupos de `enabled_groups`. |
 
 ### Otros eventos con campos propios
