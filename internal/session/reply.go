@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -54,21 +55,44 @@ func (r *replier) handle(rawEvt any) bool {
 		return true
 	}
 	info := evt.Info
-	phone, via := senderPhone(r.ctx, r.client.Store.LIDs, info)
+	device := r.client.Store
+	text := eventlog.Text(evt.Message)
 
-	decision := r.responder.Decide(responder.Message{
-		Private:     isPrivate(info.Chat),
-		FromMe:      info.IsFromMe,
-		SenderPhone: phone,
-		Text:        eventlog.Text(evt.Message),
-		IsEdit:      evt.IsEdit || info.Edit != "",
-	})
+	msg := responder.Message{
+		Private: isPrivate(info.Chat),
+		Group:   info.Chat.Server == types.GroupServer,
+		Chat:    info.Chat.String(),
+		FromMe:  info.IsFromMe,
+		IsText:  evt.Message.GetConversation() != "" || evt.Message.GetExtendedTextMessage() != nil,
+		Text:    text,
+		IsEdit:  evt.IsEdit || info.Edit != "",
+	}
+
+	// Attributes that say how the sender or the tag was recognized.
+	var how []any
+	if msg.Private {
+		phone, via := senderPhone(r.ctx, device.LIDs, info)
+		msg.SenderPhone = phone
+		how = []any{"matched_via", via}
+	}
+	if msg.Group {
+		mentionedAs := selfMention(device, evt.Message)
+		msg.Mentioned = mentionedAs != ""
+		msg.Text = stripSelfMentions(text, device)
+		how = []any{"mentioned_as", mentionedAs}
+	}
+
+	decision := r.responder.Decide(msg)
+	base := []any{"id", info.ID, "chat", info.Chat.String()}
 
 	switch decision.Outcome {
 	case responder.Ignore:
 		return true
 	case responder.NoMatch:
-		r.log.Info("decision", "outcome", "no_match", "id", info.ID, "chat", info.Chat.String(), "matched_via", via)
+		r.log.Info("decision", concat([]any{"outcome", "no_match"}, base, how)...)
+		return true
+	case responder.GroupNotEnabled:
+		r.log.Info("decision", concat([]any{"outcome", "group_not_enabled"}, base, how)...)
 		return true
 	}
 
@@ -76,45 +100,56 @@ func (r *replier) handle(rawEvt any) bool {
 	// answered before and this is a repeated delivery.
 	claimed, err := r.answered.Claim(r.ctx, info.ID, info.Chat.String(), info.Sender.String())
 	if err != nil {
-		r.log.Error("decision", "outcome", "dedup_error", "id", info.ID, "err", err)
+		r.log.Error("decision", concat([]any{"outcome", "dedup_error"}, base, []any{"err", err})...)
 		return false
 	}
 	if !claimed {
-		r.log.Info("decision", "outcome", "duplicate", "id", info.ID, "chat", info.Chat.String())
+		r.log.Info("decision", concat([]any{"outcome", "duplicate"}, base)...)
 		return true
+	}
+
+	// In groups the reply quotes the message that tagged the bot, so it is
+	// clear whom it answers. In private chats it is plain text.
+	var out *waE2E.Message
+	if msg.Group {
+		out = quotedReply(decision.Reply, info, text)
+	} else {
+		reply := decision.Reply
+		out = &waE2E.Message{Conversation: &reply}
 	}
 
 	sendCtx, cancel := context.WithTimeout(r.ctx, sendTimeout)
 	defer cancel()
-	text := decision.Reply
-	resp, err := r.client.SendMessage(sendCtx, info.Chat, &waE2E.Message{Conversation: &text})
+	resp, err := r.client.SendMessage(sendCtx, info.Chat, out)
 	if err != nil {
 		// Release the claim so the next delivery can try again. The run
 		// context may already be cancelled (shutdown), so don't use it here.
 		if relErr := r.answered.Release(context.WithoutCancel(r.ctx), info.ID); relErr != nil {
-			r.log.Error("decision", "outcome", "release_error", "id", info.ID, "err", relErr)
+			r.log.Error("decision", concat([]any{"outcome", "release_error"}, base, []any{"err", relErr})...)
 		}
-		r.log.Warn("decision", "outcome", "send_failed", "id", info.ID, "chat", info.Chat.String(), "keyword", decision.Keyword, "err", err)
+		r.log.Warn("decision", concat([]any{"outcome", "send_failed"}, base, []any{"err", err})...)
 		return false
 	}
 
-	r.log.Info("decision", "outcome", "replied",
-		"id", info.ID,
-		"chat", info.Chat.String(),
-		"keyword", decision.Keyword,
-		"matched_via", via,
-		"reply_id", resp.ID,
-	)
+	r.log.Info("decision", concat(
+		[]any{"outcome", "replied"}, base, how,
+		[]any{"keyword", decision.Keyword, "default_reply", decision.Default, "reply_id", resp.ID},
+	)...)
 	return true
 }
 
-// includeText is the event log's content filter: only private messages
-// from people on the allowed list are logged with their text.
+// includeText is the event log's content filter: private messages from
+// people on the allowed list, and every message in an enabled group, are
+// logged with their text.
 func (r *replier) includeText(evt *events.Message) bool {
-	if evt.Info.IsFromMe || !isPrivate(evt.Info.Chat) {
+	info := evt.Info
+	if info.Chat.Server == types.GroupServer {
+		return r.cfg.IsEnabledGroup(info.Chat.String())
+	}
+	if info.IsFromMe || !isPrivate(info.Chat) {
 		return false
 	}
-	phone, _ := senderPhone(r.ctx, r.client.Store.LIDs, evt.Info)
+	phone, _ := senderPhone(r.ctx, r.client.Store.LIDs, info)
 	return r.cfg.IsAllowedPerson(phone)
 }
 
@@ -138,7 +173,60 @@ func senderPhone(ctx context.Context, lids store.LIDStore, info types.MessageInf
 	return "", ""
 }
 
+// selfMention returns how the bot appears among the explicit mentions of a
+// text message: "lid", "pn", or "" if it is not mentioned. Only text
+// messages count; a tag in an image or file caption is handled separately.
+func selfMention(device *store.Device, msg *waE2E.Message) string {
+	for _, raw := range msg.GetExtendedTextMessage().GetContextInfo().GetMentionedJID() {
+		mentioned, err := types.ParseJID(raw)
+		if err != nil {
+			continue
+		}
+		if as := eventlog.SelfIdentity(device, mentioned); as != "" {
+			return as
+		}
+	}
+	return ""
+}
+
+// stripSelfMentions removes the bot's "@..." tags from a message text, in
+// both forms, so the rest can be compared with the keywords.
+func stripSelfMentions(text string, device *store.Device) string {
+	if !device.LID.IsEmpty() {
+		text = strings.ReplaceAll(text, "@"+device.LID.User, "")
+	}
+	if device.ID != nil {
+		text = strings.ReplaceAll(text, "@"+device.ID.User, "")
+	}
+	return text
+}
+
+// quotedReply builds a text reply that quotes the message it answers.
+func quotedReply(reply string, info types.MessageInfo, quotedText string) *waE2E.Message {
+	id := info.ID
+	author := info.Sender.ToNonAD().String()
+	return &waE2E.Message{
+		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			Text: &reply,
+			ContextInfo: &waE2E.ContextInfo{
+				StanzaID:      &id,
+				Participant:   &author,
+				QuotedMessage: &waE2E.Message{Conversation: &quotedText},
+			},
+		},
+	}
+}
+
 // isPrivate reports whether chat is a one-to-one chat.
 func isPrivate(chat types.JID) bool {
 	return chat.Server == types.DefaultUserServer || chat.Server == types.HiddenUserServer
+}
+
+// concat joins slog attribute lists.
+func concat(parts ...[]any) []any {
+	var out []any
+	for _, p := range parts {
+		out = append(out, p...)
+	}
+	return out
 }

@@ -4,7 +4,7 @@ Bot de WhatsApp en Go construido sobre [whatsmeow](https://github.com/tulir/what
 
 ## Estado
 
-Capacidades actuales: emparejamiento por código, sesión guardada en disco, registro de eventos, servicio de systemd con arranque automático y reconexión, y respuestas fijas por palabra clave en chats privados, sin responder dos veces el mismo mensaje. Todavía no actúa en grupos ni confirma archivos.
+Capacidades actuales: emparejamiento por código, sesión guardada en disco, registro de eventos, servicio de systemd con arranque automático y reconexión, y respuestas fijas por palabra clave en chats privados y en grupos habilitados cuando etiquetan al bot, sin responder dos veces el mismo mensaje. Todavía no confirma archivos.
 
 ## Compilar (en la notebook)
 
@@ -65,15 +65,19 @@ Vive en `/etc/bottero/config.json` (dueño `root`, legible por el grupo `bottero
 ```
 
 - `keywords`: palabra clave → respuesta fija. Un mensaje coincide si su texto completo es igual a la palabra clave, sin distinguir mayúsculas ni espacios en los extremos.
-- `default_reply`: respuesta cuando etiquetan al bot en un grupo sin palabra clave. Se usa a partir de la capacidad de grupos.
+- `default_reply`: respuesta cuando etiquetan al bot en un grupo habilitado y el resto del texto no es una palabra clave. Vacío significa silencio.
 - `allowed_people`: números a los que el bot responde en privado, en el mismo formato que `pair` (solo dígitos: 549 + código de área + número). El remitente se busca primero como número, después en el identificador alternativo (`sender_alt`) y por último en la relación LID → número que guarda whatsmeow.
-- `enabled_groups`: JID de los grupos habilitados (`...@g.us`). Vacío hasta la capacidad de grupos.
+- `enabled_groups`: JID de los grupos donde el bot actúa (`...@g.us`). El JID de un grupo sale del registro: es el `chat` de cualquier mensaje de ese grupo.
 
 Si el archivo falta, no es JSON válido, tiene un campo desconocido o un valor inválido (por ejemplo, el `549XXXXXXXXXX` del ejemplo), el bot termina con código 4 y systemd no lo reinicia. El motivo queda en el journal.
 
 ## Respuestas y deduplicación
 
-En un chat privado, el bot responde si el mensaje es de texto, no es del propio número, no es una edición, el remitente está en `allowed_people` y el texto completo coincide con una palabra clave. Responde con texto plano al mismo chat, sin citar el mensaje, sin marcarlo como leído y sin mostrar "escribiendo". Todo lo demás es silencio. Los mensajes que llegaron mientras el bot estaba desconectado se responden igual.
+En ningún caso responde a mensajes del propio número, ediciones ni mensajes que no son de texto. No marca mensajes como leídos ni muestra "escribiendo". Los mensajes que llegaron mientras el bot estaba desconectado se responden igual.
+
+- **Privados:** responde si el remitente está en `allowed_people` y el texto completo coincide con una palabra clave. Responde con texto plano, sin citar.
+- **Grupos:** responde solo si el mensaje etiqueta al bot con una mención explícita (`@`) y el grupo está en `enabled_groups`. Responde a cualquier miembro, sin pasar por `allowed_people`. Saca del texto las menciones del bot (con su LID y con su número) y compara el resto con las palabras clave; si no coincide, responde con `default_reply`, o se queda en silencio si está vacío. La respuesta cita el mensaje que lo etiquetó. Citar un mensaje del bot sin `@` no cuenta como etiqueta.
+- **Grupos no habilitados:** silencio total, aunque lo etiqueten.
 
 Cada mensaje respondido queda registrado por su id en `state.db`:
 
@@ -132,16 +136,17 @@ journalctl -u bottero -o cat | grep component=event     # solo los eventos
 
 `-o cat` muestra las líneas tal como las escribe el bot, sin el prefijo del journal. El journal sobrevive a los reinicios si existe `/var/log/journal`.
 
-El registro guarda metadatos de todos los mensajes. El texto (campo `text`) se agrega solo en los mensajes privados de personas de `allowed_people`.
+El registro guarda metadatos de todos los mensajes. El texto (campo `text`) se agrega solo en los mensajes privados de personas de `allowed_people` y en todos los mensajes de los grupos de `enabled_groups`.
 
 ### Decisiones (`component=responder`)
 
-Solo para mensajes privados de texto de personas de la lista. El campo `outcome` dice qué pasó:
+Solo para mensajes privados de texto de personas de la lista y para mensajes de grupo que etiquetan al bot. Los mensajes de grupo sin etiqueta no generan línea de decisión. El campo `outcome` dice qué pasó:
 
 | `outcome` | Qué significa |
 |---|---|
-| `replied` | Respondió. Incluye `keyword`, `matched_via` (por qué identificador se reconoció al remitente: `sender`, `sender_alt` o `lid_map`) y `reply_id`, el id del mensaje enviado. |
-| `no_match` | El texto no coincide con ninguna palabra clave. Silencio. |
+| `replied` | Respondió. Incluye `keyword` (vacío si usó la respuesta por defecto), `default_reply` y `reply_id`, el id del mensaje enviado. En privados, `matched_via` dice por qué identificador se reconoció al remitente (`sender`, `sender_alt` o `lid_map`); en grupos, `mentioned_as` dice con cuál identidad del bot llegó la mención (`lid` o `pn`). |
+| `no_match` | El texto no coincide con ninguna palabra clave (y, en grupos, `default_reply` está vacío). Silencio. |
+| `group_not_enabled` | Etiquetaron al bot en un grupo que no está en `enabled_groups`. Silencio. |
 | `duplicate` | El mensaje ya se había respondido; es una reentrega. Silencio. |
 | `send_failed` | El envío falló. Se reintenta en la próxima entrega del mensaje. |
 | `dedup_error`, `release_error` | Error de la base `state.db`. |
@@ -165,7 +170,9 @@ Solo para mensajes privados de texto de personas de la lista. El campo `outcome`
 | `kind` | Qué parte del mensaje trae el contenido: `text`, `extended_text` (texto con menciones, respuestas o vista previa de enlaces), `image`, `document`, `video`, `audio`, `sticker`, `reaction`, `protocol`, etc. |
 | `edit` | Presente si el mensaje es una edición, un mensaje fijado o una eliminación (el valor es el código que usa el protocolo). |
 | `mentions` | JID mencionados, tal como llegan. |
-| `text` | Texto del mensaje. Solo en privados de personas de `allowed_people`. |
+| `quoted_id`, `quoted_from` | Si el mensaje cita a otro (una respuesta): id y autor del mensaje citado, tal como llegan. |
+| `quoted_bot` | Presente si el mensaje citado es del bot: `lid` o `pn`, según la forma en que llegó el autor. |
+| `text` | Texto del mensaje. Solo en privados de personas de `allowed_people` y en grupos de `enabled_groups`. |
 
 ### Otros eventos con campos propios
 

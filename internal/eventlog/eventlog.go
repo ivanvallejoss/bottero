@@ -139,8 +139,20 @@ func (l *Logger) message(name string, evt *events.Message) {
 	if info.Edit != "" {
 		attrs = append(attrs, "edit", string(info.Edit))
 	}
-	if mentioned := contextInfo(evt.Message).GetMentionedJID(); len(mentioned) > 0 {
+	ci := contextInfo(evt.Message)
+	if mentioned := ci.GetMentionedJID(); len(mentioned) > 0 {
 		attrs = append(attrs, "mentions", strings.Join(mentioned, ","))
+	}
+	// A reply that quotes another message carries the quoted message's id
+	// and author. quoted_bot says whether that author is the bot, and in
+	// which of its two forms it arrived.
+	if quotedID := ci.GetStanzaID(); quotedID != "" {
+		attrs = append(attrs, "quoted_id", quotedID, "quoted_from", ci.GetParticipant())
+		if author, err := types.ParseJID(ci.GetParticipant()); err == nil {
+			if as := SelfIdentity(l.device, author); as != "" {
+				attrs = append(attrs, "quoted_bot", as)
+			}
+		}
 	}
 	if l.includeText != nil && l.includeText(evt) {
 		if text := Text(evt.Message); text != "" {
@@ -148,6 +160,20 @@ func (l *Logger) message(name string, evt *events.Message) {
 		}
 	}
 	l.log.Info("event", attrs...)
+}
+
+// SelfIdentity reports whether j is one of the bot's own identities,
+// ignoring the device number: "lid" for its LID, "pn" for its phone-number
+// JID, or "" if neither. Mentions and quotes carry the identity without the
+// device number, unlike the bot's own JIDs.
+func SelfIdentity(device *store.Device, j types.JID) string {
+	if !device.LID.IsEmpty() && j.User == device.LID.User && j.Server == device.LID.Server {
+		return "lid"
+	}
+	if device.ID != nil && j.User == device.ID.User && j.Server == device.ID.Server {
+		return "pn"
+	}
+	return ""
 }
 
 // Text returns the text of a plain or extended text message, or "".
