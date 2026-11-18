@@ -132,6 +132,8 @@ Los dos `grep` sirven igual sobre el `bottero` de la notebook, antes de copiarlo
 
 ### Tests
 
+En la notebook; el homelab no tiene Go instalado:
+
 ```sh
 go test ./...
 ```
