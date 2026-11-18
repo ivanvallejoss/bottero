@@ -89,7 +89,7 @@ Los metadatos vienen en el propio mensaje; el bot no descarga nada.
 
 - Emparejar por código desde una terminal SSH funcionó.
 - La primera conexión después de emparejar sube 812 claves de cifrado. En el disco rígido de la HP, eso tardó más de 30 s.
-- La sincronización inicial trajo el historial (3 conversaciones) y unos 2000 nombres de contactos. Guardar esos nombres, de a uno por escritura, tuvo la base ocupada en el disco rígido y un mensaje no se pudo descifrar (`SQLITE_BUSY`). Se pasó a `synchronous=NORMAL`; el problema no volvió a aparecer, aunque tampoco hubo otra sincronización grande.
+- La sincronización inicial trajo el historial (3 conversaciones) y unos 2000 nombres de contactos. Guardar esos nombres, de a uno por escritura, tuvo la base ocupada en el disco rígido y un mensaje no se pudo descifrar (`SQLITE_BUSY`). La causa: whatsmeow descifra cada mensaje en una transacción que primero lee la sesión de cifrado y después la escribe, y con el `BEGIN` común SQLite responde `SQLITE_BUSY` al instante, sin esperar el `busy_timeout`, si otra conexión está escribiendo. Se resolvió con `_txlock=immediate` en la base de la sesión, que además pasó a `synchronous=NORMAL`. El cambio a NORMAL anotado antes acá no estaba aplicado: hasta este cambio, la sesión corrió en FULL. No hubo otra sincronización grande para verlo en vivo; los tests de `internal/session/store_test.go` reproducen el choque y pasan en la HP.
 - El teléfono mostró la carga del historial como "en pausa" para el dispositivo del bot. No afecta la recepción de mensajes nuevos.
 - Consumo del servicio: 1,5 s de CPU en tres horas y 10,8 MB de memoria como máximo.
 
