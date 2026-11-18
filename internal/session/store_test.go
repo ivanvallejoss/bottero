@@ -46,6 +46,35 @@ func TestOpenStoreWithSessionDSN(t *testing.T) {
 	}
 }
 
+// TestSessionDSNSettings checks the settings each connection gets from the
+// session connection string.
+func TestSessionDSNSettings(t *testing.T) {
+	db, err := sql.Open("sqlite", sessionDSN(t.TempDir()))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	tests := []struct {
+		pragma string
+		want   string
+	}{
+		{"foreign_keys", "1"},
+		{"busy_timeout", "5000"},
+		{"journal_mode", "wal"},
+		{"synchronous", "1"}, // NORMAL
+	}
+	for _, tt := range tests {
+		var got string
+		if err := db.QueryRow("PRAGMA " + tt.pragma).Scan(&got); err != nil {
+			t.Fatalf("PRAGMA %s: %v", tt.pragma, err)
+		}
+		if got != tt.want {
+			t.Errorf("PRAGMA %s = %s, want %s", tt.pragma, got, tt.want)
+		}
+	}
+}
+
 // TestSessionTransactionsWaitForTheWriteLock checks that, with the session
 // connection string, a transaction shaped like whatsmeow's decryption waits
 // for another writer instead of failing.
