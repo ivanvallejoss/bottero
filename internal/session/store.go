@@ -25,14 +25,30 @@ func OpenStore(ctx context.Context, dataDir string, log waLog.Logger) (*sqlstore
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
 
-	// modernc.org/sqlite applies _pragma parameters to every new connection.
-	// whatsmeow refuses to start if foreign keys are off.
-	dsn := "file:" + filepath.Join(dataDir, sessionDBFile) +
-		"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
-
-	container, err := sqlstore.New(ctx, "sqlite", dsn, log)
+	container, err := sqlstore.New(ctx, "sqlite", sessionDSN(dataDir), log)
 	if err != nil {
 		return nil, fmt.Errorf("open session store: %w", err)
 	}
 	return container, nil
+}
+
+// sessionDSN is the connection string of the session database in dataDir.
+//
+// modernc.org/sqlite applies the _pragma parameters to every new connection.
+// whatsmeow refuses to start if foreign keys are off.
+//
+// _txlock=immediate makes the driver start every transaction with BEGIN
+// IMMEDIATE, which takes the write lock before the first read. whatsmeow
+// decrypts each message in a transaction that first reads the Signal session
+// and then writes it back. Started with a plain BEGIN, that transaction is
+// already reading when it asks for the write lock, and SQLite then returns
+// SQLITE_BUSY at once instead of waiting for busy_timeout: when another
+// connection holds the write lock, and also when another connection committed
+// after the read. During the initial sync, whatsmeow stores contact names one
+// by one on another connection, and a message failed to decrypt that way.
+// With BEGIN IMMEDIATE the transaction waits for the lock under busy_timeout,
+// like any single write. Transactions opened as read-only keep a plain BEGIN.
+func sessionDSN(dataDir string) string {
+	return "file:" + filepath.Join(dataDir, sessionDBFile) +
+		"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_txlock=immediate"
 }
