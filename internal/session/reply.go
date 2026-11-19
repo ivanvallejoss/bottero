@@ -247,12 +247,33 @@ func selfMention(device *store.Device, msg *waE2E.Message) string {
 // both forms, so the rest can be compared with the keywords.
 func stripSelfMentions(text string, device *store.Device) string {
 	if !device.LID.IsEmpty() {
-		text = strings.ReplaceAll(text, "@"+device.LID.User, "")
+		text = removeTag(text, "@"+device.LID.User)
 	}
 	if device.ID != nil {
-		text = strings.ReplaceAll(text, "@"+device.ID.User, "")
+		text = removeTag(text, "@"+device.ID.User)
 	}
 	return text
+}
+
+// removeTag removes every occurrence of tag that is not followed by a digit.
+// When a digit follows, the text mentions someone else whose identifier
+// starts with the same digits, and it stays as it is.
+func removeTag(text, tag string) string {
+	var b strings.Builder
+	for {
+		i := strings.Index(text, tag)
+		if i < 0 {
+			b.WriteString(text)
+			return b.String()
+		}
+		end := i + len(tag)
+		if end < len(text) && text[end] >= '0' && text[end] <= '9' {
+			b.WriteString(text[:end])
+		} else {
+			b.WriteString(text[:i])
+		}
+		text = text[end:]
+	}
 }
 
 // quotedReply builds a text reply that quotes the message it answers.

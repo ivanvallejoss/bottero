@@ -163,6 +163,11 @@ func TestStripSelfMentions(t *testing.T) {
 		{"number tag", "@" + botPhone + " ping", " ping"},
 		{"repeated tags in both forms", "@" + botLID + " ping @" + botPhone, " ping "},
 		{"other mentions stay", "@" + otherLID + " ping @" + botLID, "@" + otherLID + " ping "},
+		{"tag at the end", "ping @" + botLID, "ping "},
+		{"tag followed by punctuation", "@" + botLID + ", ping", ", ping"},
+		{"LID that starts with the bot's digits stays", "@" + botLID + "7 ping", "@" + botLID + "7 ping"},
+		{"number that starts with the bot's digits stays", "@" + botPhone + "1 ping", "@" + botPhone + "1 ping"},
+		{"look-alike and the bot's tag", "@" + botLID + "7 ping @" + botLID, "@" + botLID + "7 ping "},
 		{"no tag", "ping", "ping"},
 	}
 	for _, tt := range tests {
