@@ -12,9 +12,10 @@ User=bottero
 Group=bottero
 ExecStart=/usr/local/bin/bottero run -config /etc/bottero/config.json -data-dir /var/lib/bottero
 
-# /var/lib/bottero holds the whatsmeow session (session.db) and the record of
-# answered messages (state.db). systemd creates it if needed and makes the
-# service user its owner.
+# /var/lib/bottero holds the whatsmeow session (session.db) and the bot's own
+# state (state.db): the messages waiting for a reply and the record of those
+# already attended. systemd creates it if needed and makes the service user
+# its owner.
 StateDirectory=bottero
 StateDirectoryMode=0700
 

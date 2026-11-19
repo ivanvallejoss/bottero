@@ -20,9 +20,9 @@ import (
 	"syscall"
 
 	"github.com/ivanvallejoss/bottero/internal/config"
-	"github.com/ivanvallejoss/bottero/internal/dedup"
 	"github.com/ivanvallejoss/bottero/internal/eventlog"
 	"github.com/ivanvallejoss/bottero/internal/session"
+	"github.com/ivanvallejoss/bottero/internal/state"
 )
 
 const (
@@ -138,11 +138,11 @@ func runCmd(ctx context.Context, logger *slog.Logger, args []string) error {
 	keywords, people, groups := cfg.Summary()
 	logger.Info("configuration loaded", "component", "bottero", "keywords", keywords, "allowed_people", people, "enabled_groups", groups)
 
-	answered, err := dedup.Open(ctx, *dataDir)
+	st, err := state.Open(ctx, *dataDir)
 	if err != nil {
 		return err
 	}
-	defer answered.Close()
+	defer st.Close()
 
 	waLogger := eventlog.WhatsmeowLogger(logger)
 	container, err := session.OpenStore(ctx, *dataDir, waLogger.Sub("Database"))
@@ -151,7 +151,7 @@ func runCmd(ctx context.Context, logger *slog.Logger, args []string) error {
 	}
 	defer container.Close()
 
-	return session.Run(ctx, container, waLogger, logger, cfg, answered)
+	return session.Run(ctx, container, waLogger, logger, cfg, st)
 }
 
 // whatsmeowVersion reports the whatsmeow module version compiled into the

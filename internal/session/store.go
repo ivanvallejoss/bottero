@@ -55,7 +55,7 @@ func OpenStore(ctx context.Context, dataDir string, log waLog.Logger) (*sqlstore
 // short. The database is not corrupted by a power cut, and commits survive a
 // crash or restart of the process; a power cut can roll back the last commits
 // that the system had not yet written to disk. The state database keeps
-// synchronous(FULL) for the reason given in the dedup package.
+// synchronous(FULL) for the reason given in the state package.
 func sessionDSN(dataDir string) string {
 	return "file:" + filepath.Join(dataDir, sessionDBFile) +
 		"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_txlock=immediate"

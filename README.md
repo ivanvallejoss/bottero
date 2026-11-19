@@ -6,22 +6,40 @@ Bot de WhatsApp que armé en Go sobre [whatsmeow](https://github.com/tulir/whats
 
 Responde con mensajes fijos que salen de la configuración. Nunca inicia una conversación.
 
-No responde a mensajes del propio número, a ediciones ni a mensajes que no sean texto, imagen o documento. No marca mensajes como leídos ni muestra "escribiendo". Los mensajes que llegaron mientras el bot estaba desconectado se responden igual.
+No responde a mensajes del propio número, a ediciones ni a mensajes que no sean texto, imagen o documento. No marca mensajes como leídos ni muestra "escribiendo". Los mensajes que llegaron mientras el bot estaba desconectado se responden al reconectar, salvo los que la persona mandó hace más de 24 horas (ver "Mensajes pendientes").
 
 - **Privados:** responde si el remitente está en `allowed_people` y el texto completo coincide con una palabra clave. Responde con texto plano, sin citar.
 - **Grupos:** responde solo si el mensaje etiqueta al bot con una mención explícita (`@`) y el grupo está en `enabled_groups`. Responde a cualquier miembro, sin pasar por `allowed_people`. Saca del texto las menciones del bot (con su LID y con su número), sin tocar las de otro identificador que empiece con los mismos dígitos, y compara el resto con las palabras clave; si no coincide, responde con `default_reply`, o se queda en silencio si está vacío. La respuesta cita el mensaje que lo etiquetó. Citar un mensaje del bot sin `@` no cuenta como etiqueta.
 - **Grupos no habilitados:** silencio total, aunque lo etiqueten.
 - **Imágenes y documentos:** se confirman con `image_ack` o `document_ack` y las mismas reglas: en privado, a personas de `allowed_people`; en grupos habilitados, cuando el pie etiqueta al bot (y la confirmación cita el archivo). El pie no se compara con las palabras clave. El bot no descarga el archivo: los metadatos vienen en el propio mensaje. Video, audio, notas de voz y stickers solo se registran.
 
-### Deduplicación
+### Mensajes pendientes
 
-Cada mensaje respondido queda registrado por su id en `state.db`:
+whatsmeow entrega los mensajes de a uno: mientras un handler no termina, no procesa el siguiente. Por eso el bot separa recibir de responder.
 
-1. Antes de responder, el bot registra el id. Si ya estaba, es una reentrega y no responde.
-2. Envía la respuesta.
-3. Si el envío falla, borra el registro y le avisa a whatsmeow que el mensaje no se procesó. whatsmeow no confirma el mensaje al servidor, que lo vuelve a entregar al reconectar, y el bot reintenta.
+**Recibir.** El handler aplica las reglas de arriba para saber si el bot atiende el mensaje. Si lo atiende, lo guarda en `state.db` y recién entonces le avisa a whatsmeow que el mensaje se procesó; whatsmeow lo confirma al servidor, que ya no lo vuelve a entregar. Del mensaje se guarda solo lo que usa la respuesta: el texto, los metadatos del archivo y, en grupos, lo que va en la cita.
 
-whatsmeow guarda cada mensaje descifrado hasta que el bot termina de procesarlo, así que una reentrega después de una caída llega de nuevo al bot en vez de descartarse.
+- Cada mensaje se identifica por chat e id. Si ya estaba guardado (pendiente o atendido), es una reentrega y no se guarda de nuevo.
+- Si la base falla, o si el handler entra en pánico, el bot le avisa a whatsmeow que el mensaje no se procesó. whatsmeow no lo confirma y el servidor lo vuelve a entregar en la próxima conexión. whatsmeow guarda cada mensaje descifrado hasta que el handler termina, así que esa reentrega llega de nuevo al bot en vez de descartarse.
+
+**Responder.** Otra parte del proceso, el worker, toma los mensajes guardados de a uno, en el orden en que llegaron dentro de cada chat. Un mensaje que espera un reintento frena solo a los siguientes de su chat.
+
+1. Si la persona lo mandó hace más de 24 horas, lo cierra sin responder (`expired`).
+2. Decide la respuesta. Si no hay nada que responder, lo cierra (`no_match`).
+3. Arma la respuesta, le fija un id y guarda las dos cosas antes de enviar.
+4. Envía. Si el envío sale bien, lo cierra.
+
+Si el proceso muere entre enviar y anotar el resultado, al arrancar el worker reenvía la misma respuesta con el mismo id. Probado el 19/11/2026: el servidor acepta el segundo envío y en el teléfono se ve un solo mensaje, en privado y en grupo (iPhone; Android y WhatsApp Web sin probar). Por la misma razón, un cambio en la configuración no cambia una respuesta que ya está armada.
+
+Si el envío falla:
+
+- **Sin conexión:** el intento no cuenta; el worker espera a que whatsmeow reconecte.
+- **Errores que no se arreglan reintentando** (el destinatario no está en WhatsApp, el bot no está en el grupo, el grupo no existe, el bot no tiene permiso para escribir): lo cierra como `failed`.
+- **El resto** (por ejemplo, la confirmación del servidor no llegó a tiempo): hasta 5 intentos en total, con esperas de 10 s, 30 s, 2 min y 10 min. Después, `failed`.
+
+Al cerrar un mensaje se borran su contenido y su respuesta. Queda una marca, sin remitente ni contenido, durante 14 días (el plazo en que el servidor de WhatsApp puede volver a entregar un mensaje), para reconocer las reentregas. Cuando el worker se queda sin mensajes pendientes, trunca el WAL de `state.db`, donde quedan copias viejas de las páginas con el texto.
+
+**Apagado.** Con `systemctl stop` o `restart`: el worker deja de tomar mensajes y termina el envío en curso (hasta 30 s); después el bot se desconecta, espera a que termine un handler en curso y cierra las bases. Un mensaje que llega en esos segundos queda guardado y se responde al arrancar.
 
 El historial que manda el teléfono llega como eventos `HistorySync`, no como mensajes, y nunca se responde.
 
@@ -138,16 +156,21 @@ En la notebook; el homelab no tiene Go instalado:
 go test ./...
 ```
 
-Los tests de `internal/session/store_test.go` abren bases SQLite reales con la cadena de conexión de la sesión y reproducen el choque entre conexiones que describe "Bases de datos". En el homelab muestran cómo responde el disco rígido:
+Dos grupos de tests abren bases SQLite reales, y en el homelab muestran cómo responde el disco rígido:
+
+- `internal/session/store_test.go`, con la cadena de conexión de la sesión: reproducen el choque entre conexiones que describe "Bases de datos".
+- `internal/state`: la base de estado, incluido que el texto de un mensaje cerrado no quede en ningún archivo y cuánto espera un guardado del handler mientras el worker escribe.
 
 ```sh
 # notebook
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -trimpath -o /tmp/session.test ./internal/session
-scp /tmp/session.test ivan@hp-g4-vallejos:~/
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -trimpath -o /tmp/state.test ./internal/state
+scp /tmp/session.test /tmp/state.test ivan@hp-g4-vallejos:~/
 # homelab
 mkdir -p ~/bottero-test
 TMPDIR=~/bottero-test ./session.test -test.v -test.run 'TestOpenStore|TestSession|TestDeferred'
-rm -rf ~/bottero-test session.test
+TMPDIR=~/bottero-test ./state.test -test.v
+rm -rf ~/bottero-test session.test state.test
 ```
 
 `TMPDIR` lleva las bases de prueba al disco rígido. El binario de test va a `/tmp` en la notebook porque `.gitignore` no lo cubre.
@@ -159,7 +182,11 @@ Las dos viven en `/var/lib/bottero`, en modo WAL (cada una con sus archivos `-wa
 - **`session.db`**: la sesión de whatsmeow (credenciales, claves de cifrado, contactos, relación LID → número y los mensajes descifrados mientras el bot los procesa). La cadena de conexión agrega dos ajustes:
   - `_txlock=immediate`: cada transacción toma el bloqueo de escritura al empezar. whatsmeow descifra cada mensaje en una transacción que primero lee la sesión de cifrado y después la escribe. Con el `BEGIN` común, si otra conexión está escribiendo, SQLite le responde `SQLITE_BUSY` al instante, sin esperar el `busy_timeout`, y el mensaje no se descifra. Pasó en la sincronización inicial, mientras whatsmeow guardaba los nombres de contactos de a uno. `TestDeferredTransactionsFailAtOnce` documenta esa falla: si empieza a fallar después de actualizar el driver, SQLite cambió ese comportamiento y conviene revisar la razón de este ajuste.
   - `synchronous=NORMAL`: un commit no espera el fsync del disco; el fsync queda para los checkpoints. Un corte de luz puede deshacer los últimos commits que el sistema todavía no había escrito en el disco. La base no se corrompe, y una caída o un reinicio del proceso no pierden nada.
-- **`state.db`**: los ids de los mensajes ya respondidos. Usa `synchronous=FULL`: el registro tiene que estar en disco antes de que salga la respuesta, para que un corte justo después de enviar no lo borre. El bot escribe ahí solo cuando responde, así que esperar al disco no se nota.
+- **`state.db`**: los mensajes que esperan respuesta y las marcas de los ya atendidos (ver "Mensajes pendientes"). La cadena de conexión agrega:
+  - `synchronous=FULL`: cada commit espera a que el WAL esté en disco. Un mensaje guardado ya está confirmado a WhatsApp, que no lo va a volver a entregar, así que el guardado tiene que sobrevivir a un corte de luz. En la HP, un guardado tarda unos 45 ms (p99 de 67 a 78 ms); mientras el worker escribe sin parar, unos 90 ms (p99 de 179 ms).
+  - `secure_delete`: lo que se borra se pisa con ceros en el archivo de la base.
+  - `_txlock=immediate`: por la misma razón que en la sesión. Hoy no hace falta, porque la base usa una sola conexión y el handler y el worker se turnan dentro del proceso.
+  - La versión del esquema va en `user_version`. Al pasar de la versión anterior, los ids de la tabla `answered` se convierten en marcas con resultado `answered`.
 
 ### Reinicios y reconexión
 
@@ -198,17 +225,25 @@ El registro guarda metadatos de todos los mensajes. El texto (campo `text`) se a
 
 ### Decisiones (`component=responder`)
 
-Solo para mensajes privados de texto, imágenes o documentos de personas de la lista y para mensajes de grupo que etiquetan al bot. Los mensajes de grupo sin etiqueta no generan línea de decisión. El campo `outcome` dice qué pasó:
+Solo para mensajes privados de texto, imágenes o documentos de personas de la lista y para mensajes de grupo que etiquetan al bot. Los mensajes de grupo sin etiqueta no generan línea de decisión. Un mensaje que el bot atiende deja dos líneas: `queued` cuando el handler lo guarda, y la del resultado cuando el worker lo cierra. El campo `outcome` dice qué pasó:
 
 | `outcome` | Qué significa |
 |---|---|
-| `replied` | Respondió. Incluye `keyword` (vacío si usó la respuesta por defecto), `default_reply` y `reply_id`, el id del mensaje enviado. En privados, `matched_via` dice por qué identificador se reconoció al remitente (`sender`, `sender_alt` o `lid_map`); en grupos, `mentioned_as` dice con cuál identidad del bot llegó la mención (`lid` o `pn`). |
+| `queued` | El handler guardó el mensaje; el worker lo va a responder. En privados, `matched_via` dice por qué identificador se reconoció al remitente (`sender`, `sender_alt` o `lid_map`); en grupos, `mentioned_as` dice con cuál identidad del bot llegó la mención (`lid` o `pn`). |
+| `replied` | Respondió. Incluye `keyword` (vacío si usó la respuesta por defecto), `default_reply`, `reply_id` (el id del mensaje enviado), `attempt` (en qué intento salió) y `waited` (cuánto pasó desde que se guardó), además de `matched_via` o `mentioned_as`. |
+| `file_ack` | Confirmó una imagen o un documento. `media` dice cuál (`image` o `document`); incluye `reply_id`, `attempt` y `waited`. Si la plantilla de ese tipo está vacía, la decisión es `no_match` con `media`. |
 | `no_match` | El texto no coincide con ninguna palabra clave (y, en grupos, `default_reply` está vacío). Silencio. |
-| `group_not_enabled` | Etiquetaron al bot en un grupo que no está en `enabled_groups`. Silencio. |
-| `file_ack` | Confirmó una imagen o un documento. `media` dice cuál (`image` o `document`); incluye `reply_id`. Si la plantilla de ese tipo está vacía, la decisión es `no_match` con `media`. |
-| `duplicate` | El mensaje ya se había respondido; es una reentrega. Silencio. |
-| `send_failed` | El envío falló. Se reintenta en la próxima entrega del mensaje. |
-| `dedup_error`, `release_error` | Error de la base `state.db`. |
+| `group_not_enabled` | Etiquetaron al bot en un grupo que no está en `enabled_groups`. Silencio; no se guarda. |
+| `duplicate` | El mensaje ya estaba guardado; es una reentrega. Silencio. |
+| `retry` | El envío falló y se va a reintentar. Incluye `attempt`, `err` y `next_attempt`. |
+| `send_deferred` | No había conexión para enviar. El intento no cuenta; se reintenta al reconectar. |
+| `failed` | El bot dejó de intentar: un error que no se arregla reintentando, o el quinto intento fallido. Incluye `attempt` y `err`. |
+| `expired` | La persona lo mandó hace más de 24 horas. `age` dice cuánto. Silencio. |
+| `save_error` | El handler no pudo guardar el mensaje. whatsmeow no lo confirma y el servidor lo vuelve a entregar en la próxima conexión. |
+| `handler_panic` | El handler entró en pánico; incluye `panic` y `stack`. Igual que `save_error`, el mensaje vuelve en la próxima conexión. |
+| `state_error` | Error de la base `state.db` en el worker. El mensaje queda como estaba y el worker lo vuelve a tomar a los 5 segundos. |
+
+Con `msg=state` aparecen dos líneas más: `outcome=pruned` cuando se borran marcas de más de 14 días (`records` dice cuántas) y `outcome=state_error` cuando falla la base fuera de un mensaje.
 
 ### Campos de un mensaje (`type=Message`)
 

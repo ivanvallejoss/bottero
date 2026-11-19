@@ -2,125 +2,16 @@ package session
 
 import (
 	"context"
-	"log/slog"
 	"strings"
-	"time"
 
-	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 
-	"github.com/ivanvallejoss/bottero/internal/config"
-	"github.com/ivanvallejoss/bottero/internal/dedup"
 	"github.com/ivanvallejoss/bottero/internal/eventlog"
 	"github.com/ivanvallejoss/bottero/internal/responder"
 )
-
-// sendTimeout bounds sending one reply, so a dead connection does not hold
-// whatsmeow's message queue for long.
-const sendTimeout = 30 * time.Second
-
-// replier connects the responder to the WhatsApp client: it reduces incoming
-// messages to what the responder needs, records answered messages and sends
-// the replies. What to answer is decided by the responder alone.
-type replier struct {
-	ctx       context.Context
-	client    *whatsmeow.Client
-	cfg       *config.Config
-	responder *responder.Responder
-	answered  *dedup.Store
-	log       *slog.Logger
-}
-
-func newReplier(ctx context.Context, client *whatsmeow.Client, cfg *config.Config, answered *dedup.Store, logger *slog.Logger) *replier {
-	return &replier{
-		ctx:       ctx,
-		client:    client,
-		cfg:       cfg,
-		responder: responder.New(cfg),
-		answered:  answered,
-		log:       logger.With("component", "responder"),
-	}
-}
-
-// handle is registered with AddEventHandlerWithSuccessStatus. Returning false
-// tells whatsmeow the message was not handled: it does not confirm it to the
-// server and keeps the decrypted copy, so the server delivers it again on the
-// next connection and the reply is retried.
-func (r *replier) handle(rawEvt any) bool {
-	evt, ok := rawEvt.(*events.Message)
-	if !ok {
-		return true
-	}
-	info := evt.Info
-	msg, how := reduce(r.ctx, r.client.Store, evt)
-
-	base := []any{"id", info.ID, "chat", info.Chat.String()}
-	if msg.Media != nil {
-		base = append(base, "media", string(msg.Media.Kind))
-	}
-
-	switch r.responder.Admit(msg) {
-	case responder.Ignored:
-		return true
-	case responder.NotEnabled:
-		r.log.Info("decision", concat([]any{"outcome", "group_not_enabled"}, base, how)...)
-		return true
-	}
-
-	decision := r.responder.Answer(msg)
-	if decision.Outcome == responder.NoMatch {
-		r.log.Info("decision", concat([]any{"outcome", "no_match"}, base, how)...)
-		return true
-	}
-
-	// Claim before sending: if the message is already recorded, it was
-	// answered before and this is a repeated delivery.
-	claimed, err := r.answered.Claim(r.ctx, info.ID, info.Chat.String(), info.Sender.String())
-	if err != nil {
-		r.log.Error("decision", concat([]any{"outcome", "dedup_error"}, base, []any{"err", err})...)
-		return false
-	}
-	if !claimed {
-		r.log.Info("decision", concat([]any{"outcome", "duplicate"}, base)...)
-		return true
-	}
-
-	// In groups the reply quotes the message that tagged the bot, so it is
-	// clear whom it answers. In private chats it is plain text.
-	var out *waE2E.Message
-	if msg.Group {
-		out = quotedReply(decision.Reply, info, quotable(evt.Message, eventlog.Text(evt.Message)))
-	} else {
-		reply := decision.Reply
-		out = &waE2E.Message{Conversation: &reply}
-	}
-
-	sendCtx, cancel := context.WithTimeout(r.ctx, sendTimeout)
-	defer cancel()
-	resp, err := r.client.SendMessage(sendCtx, info.Chat, out)
-	if err != nil {
-		// Release the claim so the next delivery can try again. The run
-		// context may already be cancelled (shutdown), so don't use it here.
-		if relErr := r.answered.Release(context.WithoutCancel(r.ctx), info.ID); relErr != nil {
-			r.log.Error("decision", concat([]any{"outcome", "release_error"}, base, []any{"err", relErr})...)
-		}
-		r.log.Warn("decision", concat([]any{"outcome", "send_failed"}, base, []any{"err", err})...)
-		return false
-	}
-
-	if decision.Outcome == responder.FileAck {
-		r.log.Info("decision", concat([]any{"outcome", "file_ack"}, base, how, []any{"reply_id", resp.ID})...)
-		return true
-	}
-	r.log.Info("decision", concat(
-		[]any{"outcome", "replied"}, base, how,
-		[]any{"keyword", decision.Keyword, "default_reply", decision.Default, "reply_id", resp.ID},
-	)...)
-	return true
-}
 
 // reduce turns a whatsmeow message into what the responder needs. It also
 // returns the attributes that say how the sender or the tag was recognized,
@@ -190,21 +81,6 @@ func quotable(msg *waE2E.Message, text string) *waE2E.Message {
 		return &waE2E.Message{DocumentMessage: doc}
 	}
 	return &waE2E.Message{Conversation: &text}
-}
-
-// includeText is the event log's content filter: private messages from
-// people on the allowed list, and every message in an enabled group, are
-// logged with their text.
-func (r *replier) includeText(evt *events.Message) bool {
-	info := evt.Info
-	if info.Chat.Server == types.GroupServer {
-		return r.cfg.IsEnabledGroup(info.Chat.String())
-	}
-	if info.IsFromMe || !isPrivate(info.Chat) {
-		return false
-	}
-	phone, _ := senderPhone(r.ctx, r.client.Store.LIDs, info)
-	return r.cfg.IsAllowedPerson(phone)
 }
 
 // senderPhone returns the sender's phone number (digits only) and which
@@ -285,10 +161,9 @@ func removeTag(text, tag string) string {
 	}
 }
 
-// quotedReply builds a text reply that quotes the message it answers.
-func quotedReply(reply string, info types.MessageInfo, quoted *waE2E.Message) *waE2E.Message {
-	id := info.ID
-	author := info.Sender.ToNonAD().String()
+// quotedReply builds a text reply that quotes the message it answers: its
+// id, its author (without the device number) and the quoted part.
+func quotedReply(reply, id, author string, quoted *waE2E.Message) *waE2E.Message {
 	return &waE2E.Message{
 		ExtendedTextMessage: &waE2E.ExtendedTextMessage{
 			Text: &reply,

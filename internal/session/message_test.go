@@ -8,7 +8,6 @@ import (
 	"reflect"
 	"testing"
 
-	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
@@ -334,13 +333,8 @@ func TestMediaOf(t *testing.T) {
 }
 
 func TestQuotedReply(t *testing.T) {
-	info := types.MessageInfo{
-		MessageSource: types.MessageSource{
-			Chat:   types.NewJID("120363000000000001", types.GroupServer),
-			Sender: types.JID{User: otherLID, Device: 3, Server: types.HiddenUserServer},
-		},
-		ID: "3A0000000000000000AA",
-	}
+	const id = "3A0000000000000000AA"
+	author := lidJID(otherLID).String()
 	img := &waE2E.ImageMessage{Mimetype: ptr("image/jpeg")}
 	doc := &waE2E.DocumentMessage{FileName: ptr("informe.pdf")}
 
@@ -357,18 +351,17 @@ func TestQuotedReply(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			out := quotedReply("pong", info, quotable(tt.msg, tt.text))
+			out := quotedReply("pong", id, author, quotable(tt.msg, tt.text))
 			ext := out.GetExtendedTextMessage()
 			if ext.GetText() != "pong" {
 				t.Errorf("reply text = %q, want %q", ext.GetText(), "pong")
 			}
 			ci := ext.GetContextInfo()
-			if ci.GetStanzaID() != info.ID {
-				t.Errorf("quoted id = %q, want %q", ci.GetStanzaID(), info.ID)
+			if ci.GetStanzaID() != id {
+				t.Errorf("quoted id = %q, want %q", ci.GetStanzaID(), id)
 			}
-			// The author goes without the device number.
-			if want := lidJID(otherLID).String(); ci.GetParticipant() != want {
-				t.Errorf("quoted author = %q, want %q", ci.GetParticipant(), want)
+			if ci.GetParticipant() != author {
+				t.Errorf("quoted author = %q, want %q", ci.GetParticipant(), author)
 			}
 			if !tt.check(ci.GetQuotedMessage()) {
 				t.Errorf("quoted message = %v", ci.GetQuotedMessage())
@@ -390,8 +383,7 @@ func TestIncludeText(t *testing.T) {
 
 	device := botDevice()
 	device.LIDs = fakeLIDs{pn: map[types.JID]types.JID{lidJID(allowedLID): pnJID(allowedPhone)}}
-	// A client that never connects: includeText only reads its store.
-	r := &replier{ctx: context.Background(), cfg: cfg, client: &whatsmeow.Client{Store: device}}
+	in := &inbox{cfg: cfg, device: device}
 
 	group := func(chat string, fromMe bool) *events.Message {
 		jid, _ := types.ParseJID(chat)
@@ -424,7 +416,7 @@ func TestIncludeText(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := r.includeText(tt.evt); got != tt.want {
+			if got := in.includeText(tt.evt); got != tt.want {
 				t.Errorf("includeText() = %v, want %v", got, tt.want)
 			}
 		})
