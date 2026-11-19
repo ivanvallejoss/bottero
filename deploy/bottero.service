@@ -1,5 +1,5 @@
 [Unit]
-Description=bottero WhatsApp bot (exploration stage)
+Description=bottero WhatsApp bot
 Documentation=https://github.com/ivanvallejoss/bottero
 # Start once the network is configured. The bot also retries on its own if
 # the first connection fails (the Wi-Fi may take longer to come back).
