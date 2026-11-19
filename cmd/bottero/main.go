@@ -1,7 +1,6 @@
-// Command bottero is a WhatsApp bot built on whatsmeow. In this stage it is an
-// exploration tool: it pairs with a dedicated number, keeps the session on
-// disk, logs every event whatsmeow delivers and answers keywords with fixed
-// replies.
+// Command bottero is a WhatsApp bot built on whatsmeow. It pairs with a
+// dedicated number, keeps the session on disk, logs every event whatsmeow
+// delivers and answers keywords with fixed replies.
 //
 // Usage:
 //

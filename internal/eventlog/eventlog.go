@@ -1,9 +1,9 @@
 // Package eventlog writes one readable line per whatsmeow event.
 //
-// The log is the main output of the exploration stage. It records what
-// whatsmeow delivers, with identifiers exactly as they arrive (phone-number
-// JID or LID). It logs metadata for every message; the text is added only
-// for the messages the includeText filter accepts.
+// It records what whatsmeow delivers, with identifiers exactly as they
+// arrive (phone-number JID or LID), so the protocol can be studied from the
+// log. It logs metadata for every message; the text is added only for the
+// messages the includeText filter accepts.
 package eventlog
 
 import (

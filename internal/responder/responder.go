@@ -1,6 +1,11 @@
-// Package responder decides what the bot answers. It knows nothing about
-// whatsmeow or the connection: it receives a message already reduced to the
-// fields that matter and returns a decision. The fixed replies can later be
+// Package responder decides what the bot answers, in two steps. Admit says
+// whether the bot attends a message at all; Answer says what it replies to a
+// message Admit accepted. It knows nothing about whatsmeow or the
+// connection: it receives a message already reduced to the fields that
+// matter.
+//
+// Admit only reads the configuration and is instant, so the session can run
+// it as soon as a message arrives. Answer is the part that can later be
 // replaced (for example by a language model) without touching the session.
 package responder
 
@@ -58,28 +63,35 @@ type Media struct {
 	Pages    uint32
 }
 
-// Outcome is the kind of decision.
+// Admission is the result of Admit.
+type Admission int
+
+const (
+	// Ignored: not something the bot considers (own message, edit, private
+	// sender not on the list, empty private text, group message without a
+	// tag, other kinds of messages). Not logged as a decision.
+	Ignored Admission = iota
+	// Admitted: the bot attends the message. Answer decides what to reply.
+	Admitted
+	// NotEnabled: the bot was tagged in a group that is not on the enabled
+	// list. Silence.
+	NotEnabled
+)
+
+// Outcome is the kind of answer.
 type Outcome int
 
 const (
-	// Ignore: not something the bot considers (own message, edit, private
-	// sender not on the list, group message without a tag, other kinds of
-	// messages). Not logged as a decision.
-	Ignore Outcome = iota
-	// NoMatch: the bot would answer, but there is nothing to answer with (no
-	// keyword matches and no default reply, or an empty confirmation
-	// template). Silence.
-	NoMatch
+	// NoMatch: there is nothing to answer with (no keyword matches and no
+	// default reply, or an empty confirmation template). Silence.
+	NoMatch Outcome = iota
 	// Reply: answer a text message with Decision.Reply.
 	Reply
 	// FileAck: confirm an image or document with Decision.Reply.
 	FileAck
-	// GroupNotEnabled: the bot was tagged in a group that is not on the
-	// enabled list. Silence.
-	GroupNotEnabled
 )
 
-// Decision is the result of Decide.
+// Decision is the result of Answer.
 type Decision struct {
 	Outcome Outcome
 	// Keyword is the normalized keyword that matched (Reply only; "" when
@@ -87,8 +99,6 @@ type Decision struct {
 	Keyword string
 	// Default is true when Reply is the configured default reply.
 	Default bool
-	// Media is the kind of file confirmed (FileAck, or NoMatch for a file).
-	Media MediaKind
 	// Reply is the text to send (Reply and FileAck).
 	Reply string
 }
@@ -103,86 +113,71 @@ func New(cfg *config.Config) *Responder {
 	return &Responder{cfg: cfg}
 }
 
-// Decide returns what to do with m.
-func (r *Responder) Decide(m Message) Decision {
+// Admit reports whether the bot attends m. In private chats it attends
+// people on the allowed list, for texts and files; in groups, any member who
+// tags the bot, if the group is on the enabled list.
+func (r *Responder) Admit(m Message) Admission {
 	if m.FromMe || m.IsEdit {
-		return Decision{Outcome: Ignore}
+		return Ignored
 	}
-	if m.Media != nil {
-		return r.decideFile(m)
-	}
-	if !m.IsText {
-		return Decision{Outcome: Ignore}
+	if m.Media == nil && !m.IsText {
+		return Ignored
 	}
 	switch {
 	case m.Private:
-		return r.decidePrivate(m)
-	case m.Group:
-		return r.decideGroup(m)
-	default:
-		return Decision{Outcome: Ignore}
-	}
-}
-
-// decidePrivate answers people on the allowed list whose whole text matches
-// a keyword.
-func (r *Responder) decidePrivate(m Message) Decision {
-	if m.Text == "" || !r.cfg.IsAllowedPerson(m.SenderPhone) {
-		return Decision{Outcome: Ignore}
-	}
-	if keyword, reply, ok := r.cfg.Reply(m.Text); ok {
-		return Decision{Outcome: Reply, Keyword: keyword, Reply: reply}
-	}
-	return Decision{Outcome: NoMatch}
-}
-
-// decideGroup answers any member who tags the bot in an enabled group: the
-// keyword's reply if the rest of the text matches one, otherwise the
-// default reply, or silence if there is none.
-func (r *Responder) decideGroup(m Message) Decision {
-	if !m.Mentioned {
-		return Decision{Outcome: Ignore}
-	}
-	if !r.cfg.IsEnabledGroup(m.Chat) {
-		return Decision{Outcome: GroupNotEnabled}
-	}
-	if keyword, reply, ok := r.cfg.Reply(m.Text); ok {
-		return Decision{Outcome: Reply, Keyword: keyword, Reply: reply}
-	}
-	if reply := r.cfg.DefaultReply(); reply != "" {
-		return Decision{Outcome: Reply, Default: true, Reply: reply}
-	}
-	return Decision{Outcome: NoMatch}
-}
-
-// decideFile confirms an image or document with the same rules as text:
-// people on the allowed list in private chats, and a tag in the caption in
-// enabled groups. The caption is not matched against the keywords.
-func (r *Responder) decideFile(m Message) Decision {
-	switch {
-	case m.Private:
-		if !r.cfg.IsAllowedPerson(m.SenderPhone) {
-			return Decision{Outcome: Ignore}
+		// A text needs something to compare with the keywords. A file is
+		// confirmed whatever its caption says.
+		if m.Media == nil && m.Text == "" {
+			return Ignored
 		}
+		if !r.cfg.IsAllowedPerson(m.SenderPhone) {
+			return Ignored
+		}
+		return Admitted
 	case m.Group:
 		if !m.Mentioned {
-			return Decision{Outcome: Ignore}
+			return Ignored
 		}
 		if !r.cfg.IsEnabledGroup(m.Chat) {
-			return Decision{Outcome: GroupNotEnabled, Media: m.Media.Kind}
+			return NotEnabled
 		}
+		return Admitted
 	default:
-		return Decision{Outcome: Ignore}
+		return Ignored
 	}
+}
 
+// Answer decides what to reply to a message Admit admitted: the keyword's
+// reply if the whole text matches one; in groups, otherwise the default
+// reply; for an image or document, its confirmation. A file's caption is not
+// matched against the keywords.
+func (r *Responder) Answer(m Message) Decision {
+	if m.Media != nil {
+		return r.answerFile(*m.Media)
+	}
+	if keyword, reply, ok := r.cfg.Reply(m.Text); ok {
+		return Decision{Outcome: Reply, Keyword: keyword, Reply: reply}
+	}
+	// The default reply is only for group tags.
+	if m.Group {
+		if reply := r.cfg.DefaultReply(); reply != "" {
+			return Decision{Outcome: Reply, Default: true, Reply: reply}
+		}
+	}
+	return Decision{Outcome: NoMatch}
+}
+
+// answerFile confirms an image or document with its template, filled with
+// the file's metadata.
+func (r *Responder) answerFile(media Media) Decision {
 	tmpl := r.cfg.DocumentAck()
-	if m.Media.Kind == Image {
+	if media.Kind == Image {
 		tmpl = r.cfg.ImageAck()
 	}
 	if tmpl == "" {
-		return Decision{Outcome: NoMatch, Media: m.Media.Kind}
+		return Decision{Outcome: NoMatch}
 	}
-	return Decision{Outcome: FileAck, Media: m.Media.Kind, Reply: render(tmpl, *m.Media)}
+	return Decision{Outcome: FileAck, Reply: render(tmpl, media)}
 }
 
 // render fills a confirmation template with the file's metadata. A value

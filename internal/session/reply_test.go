@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"go.mau.fi/whatsmeow"
@@ -182,6 +183,125 @@ func TestStripSelfMentions(t *testing.T) {
 	text := "@" + botLID + " ping"
 	if got := stripSelfMentions(text, &store.Device{}); got != text {
 		t.Errorf("stripSelfMentions on a device without identities = %q", got)
+	}
+}
+
+func TestReduce(t *testing.T) {
+	ctx := context.Background()
+	device := botDevice()
+	device.LIDs = fakeLIDs{pn: map[types.JID]types.JID{lidJID(allowedLID): pnJID(allowedPhone)}}
+	group, _ := types.ParseJID(enabledGroup)
+	botByLID := lidJID(botLID).String()
+	botByPhone := pnJID(botPhone).String()
+
+	private := func(sender types.JID, msg *waE2E.Message) *events.Message {
+		return &events.Message{
+			Info:    types.MessageInfo{MessageSource: types.MessageSource{Chat: sender.ToNonAD(), Sender: sender}},
+			Message: msg,
+		}
+	}
+	inGroup := func(msg *waE2E.Message) *events.Message {
+		return &events.Message{
+			Info: types.MessageInfo{MessageSource: types.MessageSource{
+				Chat: group, Sender: lidJID(otherLID), SenderAlt: pnJID(otherPhone), IsGroup: true,
+			}},
+			Message: msg,
+		}
+	}
+	change := func(evt *events.Message, f func(*events.Message)) *events.Message {
+		f(evt)
+		return evt
+	}
+	ping := func() *waE2E.Message { return &waE2E.Message{Conversation: ptr("ping")} }
+	tagByLID := func() *waE2E.Message {
+		return &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{
+			Text: ptr("@" + botLID + " ping"), ContextInfo: mentioning(botByLID),
+		}}
+	}
+	allowedChat := lidJID(allowedLID).String()
+
+	tests := []struct {
+		name    string
+		evt     *events.Message
+		want    responder.Message
+		wantHow []any
+	}{
+		{"private text, sender found in the LID map",
+			private(lidJID(allowedLID), ping()),
+			responder.Message{Private: true, Chat: allowedChat, SenderPhone: allowedPhone, IsText: true, Text: "ping"},
+			[]any{"matched_via", "lid_map"}},
+		{"private text, sender as a phone number",
+			private(pnJID(allowedPhone), ping()),
+			responder.Message{Private: true, Chat: pnJID(allowedPhone).String(), SenderPhone: allowedPhone, IsText: true, Text: "ping"},
+			[]any{"matched_via", "sender"}},
+		{"private text, sender not resolved",
+			private(lidJID(otherLID), ping()),
+			responder.Message{Private: true, Chat: lidJID(otherLID).String(), IsText: true, Text: "ping"},
+			[]any{"matched_via", ""}},
+		// Only groups look for the bot's tag and remove it from the text.
+		{"private text with the bot's tag",
+			private(lidJID(allowedLID), tagByLID()),
+			responder.Message{Private: true, Chat: allowedChat, SenderPhone: allowedPhone, IsText: true, Text: "@" + botLID + " ping"},
+			[]any{"matched_via", "lid_map"}},
+		{"private document",
+			private(pnJID(allowedPhone), &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{
+				Mimetype: ptr("application/pdf"), FileLength: ptr[uint64](4096), FileName: ptr("informe.pdf"), PageCount: ptr[uint32](4),
+			}}),
+			responder.Message{Private: true, Chat: pnJID(allowedPhone).String(), SenderPhone: allowedPhone, Media: &responder.Media{
+				Kind: responder.Document, Mimetype: "application/pdf", Size: 4096, Name: "informe.pdf", Pages: 4,
+			}},
+			[]any{"matched_via", "sender"}},
+		{"own private message",
+			change(private(lidJID(allowedLID), ping()), func(e *events.Message) {
+				e.Info.Sender = types.JID{User: botLID, Device: 2, Server: types.HiddenUserServer}
+				e.Info.IsFromMe = true
+			}),
+			responder.Message{Private: true, Chat: allowedChat, FromMe: true, IsText: true, Text: "ping"},
+			[]any{"matched_via", ""}},
+		{"edit flagged by the event",
+			change(private(lidJID(allowedLID), ping()), func(e *events.Message) { e.IsEdit = true }),
+			responder.Message{Private: true, Chat: allowedChat, SenderPhone: allowedPhone, IsText: true, Text: "ping", IsEdit: true},
+			[]any{"matched_via", "lid_map"}},
+		{"edit flagged in the message info",
+			change(private(lidJID(allowedLID), ping()), func(e *events.Message) { e.Info.Edit = types.EditAttributeMessageEdit }),
+			responder.Message{Private: true, Chat: allowedChat, SenderPhone: allowedPhone, IsText: true, Text: "ping", IsEdit: true},
+			[]any{"matched_via", "lid_map"}},
+		{"group text tagging the bot's LID",
+			inGroup(tagByLID()),
+			responder.Message{Group: true, Chat: enabledGroup, IsText: true, Text: " ping", Mentioned: true},
+			[]any{"mentioned_as", "lid"}},
+		{"group text without a tag",
+			inGroup(ping()),
+			responder.Message{Group: true, Chat: enabledGroup, IsText: true, Text: "ping"},
+			[]any{"mentioned_as", ""}},
+		// The caption is not part of the text the keywords are compared with.
+		{"group image tagging the bot's number in the caption",
+			inGroup(&waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+				Caption: ptr("@" + botPhone + " mirá"), ContextInfo: mentioning(botByPhone),
+				Mimetype: ptr("image/jpeg"), FileLength: ptr[uint64](2048), Width: ptr[uint32](800), Height: ptr[uint32](600),
+			}}),
+			responder.Message{Group: true, Chat: enabledGroup, Mentioned: true, Media: &responder.Media{
+				Kind: responder.Image, Mimetype: "image/jpeg", Size: 2048, Width: 800, Height: 600,
+			}},
+			[]any{"mentioned_as", "pn"}},
+		{"status broadcast",
+			&events.Message{
+				Info:    types.MessageInfo{MessageSource: types.MessageSource{Chat: types.StatusBroadcastJID, Sender: pnJID(allowedPhone)}},
+				Message: ping(),
+			},
+			responder.Message{Chat: types.StatusBroadcastJID.String(), IsText: true, Text: "ping"},
+			nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, how := reduce(ctx, device, tt.evt)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("reduce() message = %+v, want %+v", got, tt.want)
+			}
+			if !reflect.DeepEqual(how, tt.wantHow) {
+				t.Errorf("reduce() attributes = %v, want %v", how, tt.wantHow)
+			}
+		})
 	}
 }
 

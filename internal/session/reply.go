@@ -55,49 +55,24 @@ func (r *replier) handle(rawEvt any) bool {
 		return true
 	}
 	info := evt.Info
-	device := r.client.Store
-	text := eventlog.Text(evt.Message)
+	msg, how := reduce(r.ctx, r.client.Store, evt)
 
-	msg := responder.Message{
-		Private: isPrivate(info.Chat),
-		Group:   info.Chat.Server == types.GroupServer,
-		Chat:    info.Chat.String(),
-		FromMe:  info.IsFromMe,
-		IsText:  evt.Message.GetConversation() != "" || evt.Message.GetExtendedTextMessage() != nil,
-		Text:    text,
-		Media:   mediaOf(evt.Message),
-		IsEdit:  evt.IsEdit || info.Edit != "",
-	}
-
-	// Attributes that say how the sender or the tag was recognized.
-	var how []any
-	if msg.Private {
-		phone, via := senderPhone(r.ctx, device.LIDs, info)
-		msg.SenderPhone = phone
-		how = []any{"matched_via", via}
-	}
-	if msg.Group {
-		mentionedAs := selfMention(device, evt.Message)
-		msg.Mentioned = mentionedAs != ""
-		msg.Text = stripSelfMentions(text, device)
-		how = []any{"mentioned_as", mentionedAs}
-	}
-
-	decision := r.responder.Decide(msg)
 	base := []any{"id", info.ID, "chat", info.Chat.String()}
-
-	if decision.Media != "" {
-		base = append(base, "media", string(decision.Media))
+	if msg.Media != nil {
+		base = append(base, "media", string(msg.Media.Kind))
 	}
 
-	switch decision.Outcome {
-	case responder.Ignore:
+	switch r.responder.Admit(msg) {
+	case responder.Ignored:
 		return true
-	case responder.NoMatch:
-		r.log.Info("decision", concat([]any{"outcome", "no_match"}, base, how)...)
-		return true
-	case responder.GroupNotEnabled:
+	case responder.NotEnabled:
 		r.log.Info("decision", concat([]any{"outcome", "group_not_enabled"}, base, how)...)
+		return true
+	}
+
+	decision := r.responder.Answer(msg)
+	if decision.Outcome == responder.NoMatch {
+		r.log.Info("decision", concat([]any{"outcome", "no_match"}, base, how)...)
 		return true
 	}
 
@@ -117,7 +92,7 @@ func (r *replier) handle(rawEvt any) bool {
 	// clear whom it answers. In private chats it is plain text.
 	var out *waE2E.Message
 	if msg.Group {
-		out = quotedReply(decision.Reply, info, quotable(evt.Message, text))
+		out = quotedReply(decision.Reply, info, quotable(evt.Message, eventlog.Text(evt.Message)))
 	} else {
 		reply := decision.Reply
 		out = &waE2E.Message{Conversation: &reply}
@@ -145,6 +120,40 @@ func (r *replier) handle(rawEvt any) bool {
 		[]any{"keyword", decision.Keyword, "default_reply", decision.Default, "reply_id", resp.ID},
 	)...)
 	return true
+}
+
+// reduce turns a whatsmeow message into what the responder needs. It also
+// returns the attributes that say how the sender or the tag was recognized,
+// for the decision log: matched_via in private chats, mentioned_as in
+// groups.
+func reduce(ctx context.Context, device *store.Device, evt *events.Message) (responder.Message, []any) {
+	info := evt.Info
+	text := eventlog.Text(evt.Message)
+
+	msg := responder.Message{
+		Private: isPrivate(info.Chat),
+		Group:   info.Chat.Server == types.GroupServer,
+		Chat:    info.Chat.String(),
+		FromMe:  info.IsFromMe,
+		IsText:  evt.Message.GetConversation() != "" || evt.Message.GetExtendedTextMessage() != nil,
+		Text:    text,
+		Media:   mediaOf(evt.Message),
+		IsEdit:  evt.IsEdit || info.Edit != "",
+	}
+
+	var how []any
+	if msg.Private {
+		phone, via := senderPhone(ctx, device.LIDs, info)
+		msg.SenderPhone = phone
+		how = []any{"matched_via", via}
+	}
+	if msg.Group {
+		mentionedAs := selfMention(device, evt.Message)
+		msg.Mentioned = mentionedAs != ""
+		msg.Text = stripSelfMentions(text, device)
+		how = []any{"mentioned_as", mentionedAs}
+	}
+	return msg, how
 }
 
 // mediaOf describes an image or document by the metadata in the message,

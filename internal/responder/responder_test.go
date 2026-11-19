@@ -80,20 +80,40 @@ const (
 	documentReply = "Archivo informe.pdf application/pdf 3.0 MB 4"
 )
 
-var pong = Decision{Outcome: Reply, Keyword: "ping", Reply: "pong"}
+// result is what the bot does with a message: Admit's verdict and, for an
+// admitted message, what Answer decides.
+type result struct {
+	Admission Admission
+	Decision  Decision
+}
+
+var (
+	ignored    = result{Admission: Ignored}
+	notEnabled = result{Admission: NotEnabled}
+	noMatch    = answered(Decision{Outcome: NoMatch})
+	pong       = answered(Decision{Outcome: Reply, Keyword: "ping", Reply: "pong"})
+)
+
+func answered(d Decision) result { return result{Admission: Admitted, Decision: d} }
 
 type decideCase struct {
 	name string
 	msg  Message
-	want Decision
+	want result
 }
 
+// runDecide runs each message through Admit and, if it is admitted, through
+// Answer, the way the session does.
 func runDecide(t *testing.T, r *Responder, tests []decideCase) {
 	t.Helper()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := r.Decide(tt.msg); got != tt.want {
-				t.Errorf("Decide() = %+v, want %+v", got, tt.want)
+			got := result{Admission: r.Admit(tt.msg)}
+			if got.Admission == Admitted {
+				got.Decision = r.Answer(tt.msg)
+			}
+			if got != tt.want {
+				t.Errorf("got %+v, want %+v", got, tt.want)
 			}
 		})
 	}
@@ -104,39 +124,38 @@ func with(m Message, change func(*Message)) Message {
 	return m
 }
 
-func TestDecideIgnores(t *testing.T) {
-	ignore := Decision{Outcome: Ignore}
+func TestIgnored(t *testing.T) {
 	runDecide(t, newResponder(t, fullConfig), []decideCase{
-		{"own private text", with(privateText(allowedPhone, "ping"), func(m *Message) { m.FromMe = true }), ignore},
-		{"own group tag", with(groupText(enabledGroup, "ping", true), func(m *Message) { m.FromMe = true }), ignore},
-		{"own image", with(privateFile(allowedPhone, image()), func(m *Message) { m.FromMe = true }), ignore},
-		{"edited private text", with(privateText(allowedPhone, "ping"), func(m *Message) { m.IsEdit = true }), ignore},
-		{"edited group tag", with(groupText(enabledGroup, "ping", true), func(m *Message) { m.IsEdit = true }), ignore},
-		{"edited image", with(privateFile(allowedPhone, image()), func(m *Message) { m.IsEdit = true }), ignore},
-		{"neither text nor file", Message{Private: true, Chat: privateChat, SenderPhone: allowedPhone}, ignore},
-		{"text outside private chats and groups", Message{Chat: "status@broadcast", SenderPhone: allowedPhone, IsText: true, Text: "ping"}, ignore},
-		{"file outside private chats and groups", Message{Chat: "status@broadcast", SenderPhone: allowedPhone, Media: image()}, ignore},
+		{"own private text", with(privateText(allowedPhone, "ping"), func(m *Message) { m.FromMe = true }), ignored},
+		{"own group tag", with(groupText(enabledGroup, "ping", true), func(m *Message) { m.FromMe = true }), ignored},
+		{"own image", with(privateFile(allowedPhone, image()), func(m *Message) { m.FromMe = true }), ignored},
+		{"edited private text", with(privateText(allowedPhone, "ping"), func(m *Message) { m.IsEdit = true }), ignored},
+		{"edited group tag", with(groupText(enabledGroup, "ping", true), func(m *Message) { m.IsEdit = true }), ignored},
+		{"edited image", with(privateFile(allowedPhone, image()), func(m *Message) { m.IsEdit = true }), ignored},
+		{"neither text nor file", Message{Private: true, Chat: privateChat, SenderPhone: allowedPhone}, ignored},
+		{"text outside private chats and groups", Message{Chat: "status@broadcast", SenderPhone: allowedPhone, IsText: true, Text: "ping"}, ignored},
+		{"file outside private chats and groups", Message{Chat: "status@broadcast", SenderPhone: allowedPhone, Media: image()}, ignored},
 	})
 }
 
-func TestDecidePrivate(t *testing.T) {
+func TestPrivate(t *testing.T) {
 	runDecide(t, newResponder(t, fullConfig), []decideCase{
 		{"keyword", privateText(allowedPhone, "ping"), pong},
 		{"keyword with case and spaces", privateText(allowedPhone, "  PING \n"), pong},
 		// The default reply is only for group tags.
-		{"other text", privateText(allowedPhone, "hola, ¿qué tal?"), Decision{Outcome: NoMatch}},
-		{"empty text", privateText(allowedPhone, ""), Decision{Outcome: Ignore}},
-		{"sender not on the list", privateText(otherPhone, "ping"), Decision{Outcome: Ignore}},
-		{"sender number not resolved", privateText("", "ping"), Decision{Outcome: Ignore}},
+		{"other text", privateText(allowedPhone, "hola, ¿qué tal?"), noMatch},
+		{"empty text", privateText(allowedPhone, ""), ignored},
+		{"sender not on the list", privateText(otherPhone, "ping"), ignored},
+		{"sender number not resolved", privateText("", "ping"), ignored},
 	})
 }
 
-func TestDecideGroup(t *testing.T) {
-	defaultReply := Decision{Outcome: Reply, Default: true, Reply: "No entendí."}
+func TestGroup(t *testing.T) {
+	defaultReply := answered(Decision{Outcome: Reply, Default: true, Reply: "No entendí."})
 	runDecide(t, newResponder(t, fullConfig), []decideCase{
-		{"keyword without tag", groupText(enabledGroup, "ping", false), Decision{Outcome: Ignore}},
-		{"other text without tag", groupText(enabledGroup, "hola", false), Decision{Outcome: Ignore}},
-		{"tag in a group not enabled", groupText(disabledGroup, " ping", true), Decision{Outcome: GroupNotEnabled}},
+		{"keyword without tag", groupText(enabledGroup, "ping", false), ignored},
+		{"other text without tag", groupText(enabledGroup, "hola", false), ignored},
+		{"tag in a group not enabled", groupText(disabledGroup, " ping", true), notEnabled},
 		{"tag with keyword", groupText(enabledGroup, " ping", true), pong},
 		{"tag with other text", groupText(enabledGroup, " hola", true), defaultReply},
 		{"tag alone", groupText(enabledGroup, "", true), defaultReply},
@@ -146,15 +165,15 @@ func TestDecideGroup(t *testing.T) {
 	})
 }
 
-func TestDecideFiles(t *testing.T) {
-	imageAck := Decision{Outcome: FileAck, Media: Image, Reply: imageReply}
-	documentAck := Decision{Outcome: FileAck, Media: Document, Reply: documentReply}
+func TestFiles(t *testing.T) {
+	imageAck := answered(Decision{Outcome: FileAck, Reply: imageReply})
+	documentAck := answered(Decision{Outcome: FileAck, Reply: documentReply})
 	runDecide(t, newResponder(t, fullConfig), []decideCase{
 		{"private image", privateFile(allowedPhone, image()), imageAck},
 		{"private document", privateFile(allowedPhone, document()), documentAck},
-		{"private image from a sender not on the list", privateFile(otherPhone, image()), Decision{Outcome: Ignore}},
-		{"group image without tag", groupFile(enabledGroup, image(), false), Decision{Outcome: Ignore}},
-		{"group image tagged in a group not enabled", groupFile(disabledGroup, image(), true), Decision{Outcome: GroupNotEnabled, Media: Image}},
+		{"private image from a sender not on the list", privateFile(otherPhone, image()), ignored},
+		{"group image without tag", groupFile(enabledGroup, image(), false), ignored},
+		{"group image tagged in a group not enabled", groupFile(disabledGroup, image(), true), notEnabled},
 		{"group image tagged", groupFile(enabledGroup, image(), true), imageAck},
 		{"group document tagged", groupFile(enabledGroup, document(), true), documentAck},
 		// A file is confirmed as a file; its text is not compared with the
@@ -163,14 +182,36 @@ func TestDecideFiles(t *testing.T) {
 	})
 }
 
-func TestDecideWithoutDefaultReplyOrTemplate(t *testing.T) {
+func TestWithoutDefaultReplyOrTemplate(t *testing.T) {
 	runDecide(t, newResponder(t, sparseConfig), []decideCase{
-		{"tag with other text", groupText(enabledGroup, " hola", true), Decision{Outcome: NoMatch}},
+		{"tag with other text", groupText(enabledGroup, " hola", true), noMatch},
 		{"tag with keyword", groupText(enabledGroup, " ping", true), pong},
-		{"private document", privateFile(allowedPhone, document()), Decision{Outcome: NoMatch, Media: Document}},
-		{"group document tagged", groupFile(enabledGroup, document(), true), Decision{Outcome: NoMatch, Media: Document}},
-		{"private image still confirmed", privateFile(allowedPhone, image()), Decision{Outcome: FileAck, Media: Image, Reply: "Imagen 2 KB"}},
+		{"private document", privateFile(allowedPhone, document()), noMatch},
+		{"group document tagged", groupFile(enabledGroup, document(), true), noMatch},
+		{"private image still confirmed", privateFile(allowedPhone, image()), answered(Decision{Outcome: FileAck, Reply: "Imagen 2 KB"})},
 	})
+}
+
+// Who the bot attends is decided only by Admit. Answer trusts that the
+// message was admitted and does not look at the lists again.
+func TestAnswerDoesNotCheckAdmission(t *testing.T) {
+	r := newResponder(t, fullConfig)
+	tests := []struct {
+		name string
+		msg  Message
+		want Decision
+	}{
+		{"private text from a sender not on the list", privateText(otherPhone, "ping"), pong.Decision},
+		{"tag in a group not enabled", groupText(disabledGroup, " ping", true), pong.Decision},
+		{"group text without a tag", groupText(enabledGroup, " hola", false), Decision{Outcome: Reply, Default: true, Reply: "No entendí."}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := r.Answer(tt.msg); got != tt.want {
+				t.Errorf("Answer() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestRender(t *testing.T) {
