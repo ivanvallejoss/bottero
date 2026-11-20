@@ -25,6 +25,11 @@ const (
 	// answered. Older ones close as expired.
 	maxAge = 24 * time.Hour
 
+	// lateAfter: a reply whose first attempt goes out this long or more
+	// after the person sent the message starts with the delay notice. The
+	// notice is decided once, with the reply; later attempts send the same.
+	lateAfter = 15 * time.Minute
+
 	// keepRecords is how long the record of a closed message stays, so a
 	// repeated delivery is recognized. The WhatsApp server keeps undelivered
 	// events for up to 14 days.
@@ -231,7 +236,8 @@ func (w *worker) attend(ctx context.Context, job state.Job) result {
 	attempt := job.Attempts + 1
 
 	if err == nil {
-		attrs := []any{"reply_id", resp.ID, "attempt", attempt, "waited", w.now().Sub(job.Received).Round(time.Millisecond).String()}
+		attrs := []any{"delay_notice", built.DelayNotice, "reply_id", resp.ID, "attempt", attempt,
+			"waited", w.now().Sub(job.Received).Round(time.Millisecond).String()}
 		if built.Outcome == "replied" {
 			attrs = append([]any{"keyword", built.Keyword, "default_reply", built.Default}, attrs...)
 		}
@@ -284,6 +290,9 @@ func (w *worker) prepare(db context.Context, job *state.Job, saved savedMessage)
 	if decision.Outcome == responder.NoMatch {
 		return builtReply{}, false, nil
 	}
+	if w.now().Sub(job.Sent) >= lateAfter {
+		decision = w.responder.WithDelayNotice(decision)
+	}
 	out, err := saved.reply(job.MessageID, decision.Reply)
 	if err != nil {
 		return builtReply{}, false, unusableError{err}
@@ -292,9 +301,9 @@ func (w *worker) prepare(db context.Context, job *state.Job, saved savedMessage)
 	if err != nil {
 		return builtReply{}, false, unusableError{err}
 	}
-	built := builtReply{Message: body, Outcome: "replied", Keyword: decision.Keyword, Default: decision.Default}
+	built := builtReply{Message: body, Outcome: "replied", Keyword: decision.Keyword, Default: decision.Default, DelayNotice: decision.DelayNotice}
 	if decision.Outcome == responder.FileAck {
-		built = builtReply{Message: body, Outcome: "file_ack"}
+		built = builtReply{Message: body, Outcome: "file_ack", DelayNotice: decision.DelayNotice}
 	}
 	enc, err := encode(built)
 	if err != nil {

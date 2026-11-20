@@ -1,7 +1,7 @@
 // Package config loads the bot's configuration: keywords and their fixed
-// replies, the confirmations for images and documents, the people the bot
-// answers in private chats and the groups where it is enabled. The file is
-// read once at startup; changes apply on restart.
+// replies, the confirmations for images and documents, the notice for late
+// replies, the people the bot answers in private chats and the groups where
+// it is enabled. The file is read once at startup; changes apply on restart.
 package config
 
 import (
@@ -39,6 +39,8 @@ type Config struct {
 	// bot does not confirm that kind of file.
 	imageAck    string
 	documentAck string
+	// delayNotice goes before a reply that is late; "" means no notice.
+	delayNotice string
 }
 
 // file mirrors the JSON layout. Unknown fields are rejected, so a typo in a
@@ -50,6 +52,7 @@ type file struct {
 	EnabledGroups []string          `json:"enabled_groups"`
 	ImageAck      string            `json:"image_ack"`
 	DocumentAck   string            `json:"document_ack"`
+	DelayNotice   string            `json:"delay_notice"`
 }
 
 // Load reads and validates the configuration file at path.
@@ -74,6 +77,7 @@ func Load(path string) (*Config, error) {
 		enabledGroups: make(map[string]bool, len(raw.EnabledGroups)),
 		imageAck:      strings.TrimSpace(raw.ImageAck),
 		documentAck:   strings.TrimSpace(raw.DocumentAck),
+		delayNotice:   strings.TrimSpace(raw.DelayNotice),
 	}
 
 	if err := checkPlaceholders("image_ack", cfg.imageAck, ImagePlaceholders); err != nil {
@@ -153,6 +157,12 @@ func (c *Config) ImageAck() string {
 // confirmation.
 func (c *Config) DocumentAck() string {
 	return c.documentAck
+}
+
+// DelayNotice is the text that goes before a late reply, in the same
+// message. "" means late replies go without a notice.
+func (c *Config) DelayNotice() string {
+	return c.delayNotice
 }
 
 var placeholderRE = regexp.MustCompile(`\{[^{}]*\}`)

@@ -214,6 +214,33 @@ func TestAnswerDoesNotCheckAdmission(t *testing.T) {
 	}
 }
 
+func TestWithDelayNotice(t *testing.T) {
+	withNotice := newResponder(t, `{"delay_notice": "Perdón la demora."}`)
+	without := newResponder(t, `{}`)
+	reply := Decision{Outcome: Reply, Keyword: "ping", Reply: "pong"}
+	ack := Decision{Outcome: FileAck, Reply: "Imagen 2 KB"}
+	none := Decision{Outcome: NoMatch}
+
+	tests := []struct {
+		name string
+		r    *Responder
+		in   Decision
+		want Decision
+	}{
+		{"keyword reply", withNotice, reply, Decision{Outcome: Reply, Keyword: "ping", DelayNotice: true, Reply: "Perdón la demora.\n\npong"}},
+		{"file confirmation", withNotice, ack, Decision{Outcome: FileAck, DelayNotice: true, Reply: "Perdón la demora.\n\nImagen 2 KB"}},
+		{"nothing to reply", withNotice, none, none},
+		{"no notice configured", without, reply, reply},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.r.WithDelayNotice(tt.in); got != tt.want {
+				t.Errorf("WithDelayNotice() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRender(t *testing.T) {
 	const tmpl = "{mimetype}|{size}|{width}|{height}|{name}|{pages}"
 

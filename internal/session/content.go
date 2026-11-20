@@ -90,6 +90,8 @@ type builtReply struct {
 	Outcome string `json:"outcome"`
 	Keyword string `json:"keyword,omitempty"`
 	Default bool   `json:"default,omitempty"`
+	// DelayNotice is true when the reply starts with the delay notice.
+	DelayNotice bool `json:"delay_notice,omitempty"`
 }
 
 func encode(v any) ([]byte, error) { return json.Marshal(v) }

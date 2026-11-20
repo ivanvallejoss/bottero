@@ -7,6 +7,7 @@
   "default_reply": "No entendí. Probá con: hola, ayuda, ping.",
   "image_ack": "Recibí tu imagen: {mimetype}, {width}×{height}, {size}.",
   "document_ack": "Recibí tu archivo {name}: {mimetype}, {size}.",
+  "delay_notice": "Perdón la demora, recién vuelvo a estar en línea.",
   "allowed_people": ["549XXXXXXXXXX"],
   "enabled_groups": []
 }

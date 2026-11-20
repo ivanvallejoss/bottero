@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/types/events"
 
 	"github.com/ivanvallejoss/bottero/internal/state"
 )
@@ -381,4 +382,90 @@ func TestWorkerClosesUnusableMessages(t *testing.T) {
 	if n := len(h.sender.all()); n != 0 {
 		t.Errorf("%d sends, want 0", n)
 	}
+}
+
+// A reply that goes out 15 minutes or more after the person sent the
+// message starts with the delay notice, in the same message.
+func TestWorkerAddsTheDelayNoticeToLateReplies(t *testing.T) {
+	h := newHarness(t, testConfigWithNotice)
+	late := h.privateText("3A20", "ping")
+	late.Info.Timestamp = h.clock().Add(-lateAfter)
+	onTime := h.privateText("3A21", "ping")
+	onTime.Info.Timestamp = h.clock().Add(-lateAfter + time.Second)
+	lateInGroup := h.groupTag(enabledGroup, "3A22", "ping")
+	lateInGroup.Info.Timestamp = h.clock().Add(-time.Hour)
+	lateImage := h.privateImage("3A23")
+	lateImage.Info.Timestamp = h.clock().Add(-time.Hour)
+	for _, evt := range []*events.Message{late, onTime, lateInGroup, lateImage} {
+		h.receive(evt)
+	}
+	h.pass()
+
+	sends := h.sender.all()
+	if len(sends) != 4 {
+		t.Fatalf("%d sends, want 4", len(sends))
+	}
+	texts := []string{
+		sends[0].msg.GetConversation(),
+		sends[1].msg.GetConversation(),
+		sends[2].msg.GetExtendedTextMessage().GetText(),
+		sends[3].msg.GetConversation(),
+	}
+	want := []string{"Perdón la demora.\n\npong", "pong", "Perdón la demora.\n\npong", "Perdón la demora.\n\nImagen 2 KB"}
+	for i := range want {
+		if texts[i] != want[i] {
+			t.Errorf("reply %d = %q, want %q", i, texts[i], want[i])
+		}
+	}
+	// In the group the late reply still quotes the message.
+	if q := sends[2].msg.GetExtendedTextMessage().GetContextInfo().GetStanzaID(); q != "3A22" {
+		t.Errorf("late group reply quotes %q, want 3A22", q)
+	}
+	h.log.wantLine(t, "outcome=replied", "id=3A20", "delay_notice=true")
+	h.log.wantLine(t, "outcome=replied", "id=3A21", "delay_notice=false")
+	h.log.wantLine(t, "outcome=file_ack", "id=3A23", "delay_notice=true")
+}
+
+// The notice is decided at the first attempt. A reply that was on time then
+// keeps its text, and its id, even if a retry goes out after 15 minutes.
+func TestWorkerKeepsTheReplyOfTheFirstAttempt(t *testing.T) {
+	h := newHarness(t, testConfigWithNotice)
+	timeout := whatsmeow.ErrMessageTimedOut
+	h.sender.errs = []error{timeout, timeout, timeout}
+	evt := h.privateText("3A24", "ping")
+	evt.Info.Timestamp = h.clock().Add(-14 * time.Minute)
+	h.receive(evt)
+
+	h.pass()
+	for _, wait := range retryWaits[:3] {
+		h.advance(wait)
+		h.pass()
+	}
+	if age := h.clock().Sub(evt.Info.Timestamp); age < lateAfter {
+		t.Fatalf("the last attempt went out %v after the message; the test needs it past %v", age, lateAfter)
+	}
+
+	sends := h.sender.all()
+	if len(sends) != 4 {
+		t.Fatalf("%d sends, want 4", len(sends))
+	}
+	for i, s := range sends {
+		if s.msg.GetConversation() != "pong" || s.id != sends[0].id {
+			t.Errorf("attempt %d sent %q with id %q", i+1, s.msg.GetConversation(), s.id)
+		}
+	}
+	h.log.wantLine(t, "outcome=replied", "id=3A24", "delay_notice=false", "attempt=4")
+}
+
+// Without a notice in the configuration, late replies go as they are.
+func TestWorkerWithoutADelayNotice(t *testing.T) {
+	h := newHarness(t, testConfig)
+	evt := h.privateText("3A25", "ping")
+	evt.Info.Timestamp = h.clock().Add(-time.Hour)
+	h.receive(evt)
+	h.pass()
+	if sends := h.sender.all(); len(sends) != 1 || sends[0].msg.GetConversation() != "pong" {
+		t.Fatalf("sends = %v", sends)
+	}
+	h.log.wantLine(t, "outcome=replied", "id=3A25", "delay_notice=false")
 }

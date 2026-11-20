@@ -34,6 +34,7 @@ func TestLoadFullConfig(t *testing.T) {
 		"default_reply": "No entendí.",
 		"image_ack": "Imagen {mimetype} {width}x{height} {size}",
 		"document_ack": "Archivo {name} {mimetype} {size} {pages}",
+		"delay_notice": "Perdón la demora.",
 		"allowed_people": ["5493624000001", "5493624000002"],
 		"enabled_groups": ["120363000000000001@g.us"]
 	}`)
@@ -53,6 +54,9 @@ func TestLoadFullConfig(t *testing.T) {
 	}
 	if got := cfg.DocumentAck(); got != "Archivo {name} {mimetype} {size} {pages}" {
 		t.Errorf("DocumentAck() = %q", got)
+	}
+	if got := cfg.DelayNotice(); got != "Perdón la demora." {
+		t.Errorf("DelayNotice() = %q", got)
 	}
 
 	for phone, want := range map[string]bool{
@@ -84,8 +88,9 @@ func TestLoadEmptyObject(t *testing.T) {
 	if _, _, ok := cfg.Reply("ping"); ok {
 		t.Error(`Reply("ping") matched with no keywords`)
 	}
-	if cfg.DefaultReply() != "" || cfg.ImageAck() != "" || cfg.DocumentAck() != "" {
-		t.Errorf("replies and templates should be empty: %q, %q, %q", cfg.DefaultReply(), cfg.ImageAck(), cfg.DocumentAck())
+	if cfg.DefaultReply() != "" || cfg.ImageAck() != "" || cfg.DocumentAck() != "" || cfg.DelayNotice() != "" {
+		t.Errorf("replies, templates and notice should be empty: %q, %q, %q, %q",
+			cfg.DefaultReply(), cfg.ImageAck(), cfg.DocumentAck(), cfg.DelayNotice())
 	}
 }
 
@@ -115,7 +120,7 @@ func TestKeywordsIgnoreCaseAndSurroundingSpaces(t *testing.T) {
 }
 
 func TestRepliesAndTemplatesAreTrimmed(t *testing.T) {
-	cfg := mustLoad(t, `{"default_reply": "  No entendí.  ", "image_ack": " {size} ", "document_ack": "\t{name}\n"}`)
+	cfg := mustLoad(t, `{"default_reply": "  No entendí.  ", "image_ack": " {size} ", "document_ack": "\t{name}\n", "delay_notice": " Perdón la demora.\n"}`)
 
 	if got := cfg.DefaultReply(); got != "No entendí." {
 		t.Errorf("DefaultReply() = %q", got)
@@ -126,13 +131,16 @@ func TestRepliesAndTemplatesAreTrimmed(t *testing.T) {
 	if got := cfg.DocumentAck(); got != "{name}" {
 		t.Errorf("DocumentAck() = %q", got)
 	}
+	if got := cfg.DelayNotice(); got != "Perdón la demora." {
+		t.Errorf("DelayNotice() = %q", got)
+	}
 }
 
 func TestBlankRepliesAndTemplatesMeanSilence(t *testing.T) {
-	cfg := mustLoad(t, `{"default_reply": "   ", "image_ack": " ", "document_ack": "\n"}`)
+	cfg := mustLoad(t, `{"default_reply": "   ", "image_ack": " ", "document_ack": "\n", "delay_notice": "  "}`)
 
-	if cfg.DefaultReply() != "" || cfg.ImageAck() != "" || cfg.DocumentAck() != "" {
-		t.Errorf("blank values should load as empty: %q, %q, %q", cfg.DefaultReply(), cfg.ImageAck(), cfg.DocumentAck())
+	if cfg.DefaultReply() != "" || cfg.ImageAck() != "" || cfg.DocumentAck() != "" || cfg.DelayNotice() != "" {
+		t.Errorf("blank values should load as empty: %q, %q, %q, %q", cfg.DefaultReply(), cfg.ImageAck(), cfg.DocumentAck(), cfg.DelayNotice())
 	}
 }
 

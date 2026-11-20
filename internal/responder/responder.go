@@ -99,6 +99,8 @@ type Decision struct {
 	Keyword string
 	// Default is true when Reply is the configured default reply.
 	Default bool
+	// DelayNotice is true when Reply starts with the delay notice.
+	DelayNotice bool
 	// Reply is the text to send (Reply and FileAck).
 	Reply string
 }
@@ -165,6 +167,19 @@ func (r *Responder) Answer(m Message) Decision {
 		}
 	}
 	return Decision{Outcome: NoMatch}
+}
+
+// WithDelayNotice returns d for a reply that goes out late: the configured
+// delay notice first, a blank line, and then the reply, all in one message.
+// With no notice configured, or nothing to reply, d is returned as it is.
+func (r *Responder) WithDelayNotice(d Decision) Decision {
+	notice := r.cfg.DelayNotice()
+	if notice == "" || d.Outcome == NoMatch {
+		return d
+	}
+	d.Reply = notice + "\n\n" + d.Reply
+	d.DelayNotice = true
+	return d
 }
 
 // answerFile confirms an image or document with its template, filled with

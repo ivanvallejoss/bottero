@@ -26,10 +26,10 @@ whatsmeow entrega los mensajes de a uno: mientras un handler no termina, no proc
 
 1. Si la persona lo mandó hace más de 24 horas, lo cierra sin responder (`expired`).
 2. Decide la respuesta. Si no hay nada que responder, lo cierra (`no_match`).
-3. Arma la respuesta, le fija un id y guarda las dos cosas antes de enviar.
+3. Arma la respuesta, le fija un id y guarda las dos cosas antes de enviar. Si la persona mandó el mensaje hace 15 minutos o más, la respuesta empieza con `delay_notice`, en el mismo mensaje.
 4. Envía. Si el envío sale bien, lo cierra.
 
-Si el proceso muere entre enviar y anotar el resultado, al arrancar el worker reenvía la misma respuesta con el mismo id. Probado el 19/11/2026: el servidor acepta el segundo envío y en el teléfono se ve un solo mensaje, en privado y en grupo (iPhone; Android y WhatsApp Web sin probar). Por la misma razón, un cambio en la configuración no cambia una respuesta que ya está armada.
+Si el proceso muere entre enviar y anotar el resultado, al arrancar el worker reenvía la misma respuesta con el mismo id. Probado el 19/11/2026: el servidor acepta el segundo envío y en el teléfono se ve un solo mensaje, en privado y en grupo (iPhone; Android y WhatsApp Web sin probar). Por la misma razón, un cambio en la configuración no cambia una respuesta que ya está armada, y el aviso de demora se decide una sola vez: una respuesta que salió a tiempo en el primer intento no lo suma en un reintento.
 
 Si el envío falla:
 
@@ -91,6 +91,7 @@ Vive en `/etc/bottero/config.json` (dueño `root`, legible por el grupo `bottero
   "default_reply": "No entendí. ...",
   "image_ack": "Recibí tu imagen: {mimetype}, {width}×{height}, {size}.",
   "document_ack": "Recibí tu archivo {name}: {mimetype}, {size}.",
+  "delay_notice": "Perdón la demora, recién vuelvo a estar en línea.",
   "allowed_people": ["549XXXXXXXXXX"],
   "enabled_groups": []
 }
@@ -99,6 +100,7 @@ Vive en `/etc/bottero/config.json` (dueño `root`, legible por el grupo `bottero
 - `keywords`: palabra clave → respuesta fija. Un mensaje coincide si su texto completo es igual a la palabra clave, sin distinguir mayúsculas ni espacios en los extremos.
 - `default_reply`: respuesta cuando etiquetan al bot en un grupo habilitado y el resto del texto no es una palabra clave. Vacío significa silencio.
 - `image_ack`, `document_ack`: confirmación de una imagen o de un documento (cualquier archivo enviado como documento). Marcadores que el bot completa con los metadatos del mensaje: `{mimetype}` y `{size}` en las dos; `{width}` y `{height}` en `image_ack`; `{name}` y `{pages}` en `document_ack`. Un dato que el mensaje no trae aparece como `?`. Un marcador que no corresponde al tipo hace que la configuración se rechace al arrancar. Vacía significa que ese tipo no se confirma.
+- `delay_notice`: texto que va antes de una respuesta tardía (15 minutos o más desde que la persona mandó el mensaje), separado por una línea en blanco, en el mismo mensaje. Es fijo: la hora de WhatsApp ya muestra cuánto se demoró. Vacío significa que las respuestas tardías van sin aviso.
 - `allowed_people`: números a los que el bot responde en privado, en el mismo formato que `pair` (solo dígitos: 549 + código de área + número). El remitente se busca primero como número, después en el identificador alternativo (`sender_alt`) y por último en la relación LID → número que guarda whatsmeow.
 - `enabled_groups`: JID de los grupos donde el bot actúa (`...@g.us`). El JID de un grupo sale del registro: es el `chat` de cualquier mensaje de ese grupo.
 
@@ -230,8 +232,8 @@ Solo para mensajes privados de texto, imágenes o documentos de personas de la l
 | `outcome` | Qué significa |
 |---|---|
 | `queued` | El handler guardó el mensaje; el worker lo va a responder. En privados, `matched_via` dice por qué identificador se reconoció al remitente (`sender`, `sender_alt` o `lid_map`); en grupos, `mentioned_as` dice con cuál identidad del bot llegó la mención (`lid` o `pn`). |
-| `replied` | Respondió. Incluye `keyword` (vacío si usó la respuesta por defecto), `default_reply`, `reply_id` (el id del mensaje enviado), `attempt` (en qué intento salió) y `waited` (cuánto pasó desde que se guardó), además de `matched_via` o `mentioned_as`. |
-| `file_ack` | Confirmó una imagen o un documento. `media` dice cuál (`image` o `document`); incluye `reply_id`, `attempt` y `waited`. Si la plantilla de ese tipo está vacía, la decisión es `no_match` con `media`. |
+| `replied` | Respondió. Incluye `keyword` (vacío si usó la respuesta por defecto), `default_reply`, `delay_notice` (si la respuesta llevó el aviso de demora), `reply_id` (el id del mensaje enviado), `attempt` (en qué intento salió) y `waited` (cuánto pasó desde que se guardó), además de `matched_via` o `mentioned_as`. |
+| `file_ack` | Confirmó una imagen o un documento. `media` dice cuál (`image` o `document`); incluye `delay_notice`, `reply_id`, `attempt` y `waited`. Si la plantilla de ese tipo está vacía, la decisión es `no_match` con `media`. |
 | `no_match` | El texto no coincide con ninguna palabra clave (y, en grupos, `default_reply` está vacío). Silencio. |
 | `group_not_enabled` | Etiquetaron al bot en un grupo que no está en `enabled_groups`. Silencio; no se guarda. |
 | `duplicate` | El mensaje ya estaba guardado; es una reentrega. Silencio. |

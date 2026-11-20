@@ -33,6 +33,16 @@ const testConfig = `{
 	"enabled_groups": ["` + enabledGroup + `"]
 }`
 
+// testConfigWithNotice is testConfig with a delay notice.
+const testConfigWithNotice = `{
+	"keywords": {"ping": "pong"},
+	"default_reply": "No entendí.",
+	"image_ack": "Imagen {size}",
+	"delay_notice": "Perdón la demora.",
+	"allowed_people": ["` + allowedPhone + `"],
+	"enabled_groups": ["` + enabledGroup + `"]
+}`
+
 func loadConfig(t *testing.T, body string) *config.Config {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.json")
