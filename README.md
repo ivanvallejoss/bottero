@@ -158,9 +158,11 @@ En la notebook; el homelab no tiene Go instalado:
 go test ./...
 ```
 
-Dos grupos de tests abren bases SQLite reales, y en el homelab muestran cómo responde el disco rígido:
+Algunos tests abren bases SQLite reales, y en el homelab muestran cómo responde el disco rígido:
 
 - `internal/session/store_test.go`, con la cadena de conexión de la sesión: reproducen el choque entre conexiones que describe "Bases de datos".
+- `internal/session/securedelete_test.go`: el buffer de mensajes descifrados de whatsmeow, con y sin `secure_delete`: cuánto tarda cada escritura y dónde queda el texto después de borrarlo (`TestSessionBufferWrites`).
+- `internal/session/timing_test.go`: cuánto tarda el handler completo por mensaje, con `state.db` en disco (`TestHandlerTimes`), y cuánto de eso es la admisión, todo lo que pasa antes del guardado (`BenchmarkAdmission`).
 - `internal/state`: la base de estado, incluido que el texto de un mensaje cerrado no quede en ningún archivo y cuánto espera un guardado del handler mientras el worker escribe.
 
 ```sh
@@ -170,7 +172,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -trimpath -o /tmp/state.test ./
 scp /tmp/session.test /tmp/state.test ivan@hp-g4-vallejos:~/
 # homelab
 mkdir -p ~/bottero-test
-TMPDIR=~/bottero-test ./session.test -test.v -test.run 'TestOpenStore|TestSession|TestDeferred'
+TMPDIR=~/bottero-test ./session.test -test.v -test.run 'TestOpenStore|TestSession|TestDeferred|TestHandlerTimes' -test.bench BenchmarkAdmission -test.benchmem
 TMPDIR=~/bottero-test ./state.test -test.v
 rm -rf ~/bottero-test session.test state.test
 ```
