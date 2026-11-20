@@ -18,7 +18,9 @@ import (
 )
 
 // The bot's identities as whatsmeow stores them (with the linked device's
-// number), and the people and chats the tests use.
+// number), and the people and chats the tests use. In the test
+// configurations, the allowed person and the enabled group are in a route,
+// the other person and the disabled group in none.
 const (
 	botPhone      = "5493624000009"
 	botLID        = "123456789012345"
@@ -28,6 +30,7 @@ const (
 	otherLID      = "987654321098765"
 	enabledGroup  = "120363000000000001@g.us"
 	disabledGroup = "120363000000000002@g.us"
+	otherGroup    = "120363000000000003@g.us"
 )
 
 func ptr[T any](v T) *T { return &v }
@@ -372,7 +375,10 @@ func TestQuotedReply(t *testing.T) {
 
 func TestIncludeText(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	body := `{"allowed_people": ["` + allowedPhone + `"], "enabled_groups": ["` + enabledGroup + `"]}`
+	body := `{"routes": {
+		"main": {"people": ["` + allowedPhone + `"], "groups": ["` + enabledGroup + `"], "rules": {"keywords": {"ping": "pong"}}},
+		"otra": {"groups": ["` + otherGroup + `"], "rules": {"keywords": {"ping": "pong"}}}
+	}}`
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -402,12 +408,13 @@ func TestIncludeText(t *testing.T) {
 		evt  *events.Message
 		want bool
 	}{
-		{"enabled group, sender not on the list", group(enabledGroup, false), true},
-		{"enabled group, own message", group(enabledGroup, true), true},
-		{"group not enabled", group(disabledGroup, false), false},
-		{"private, allowed by sender_alt", private(lidJID(otherLID), pnJID(allowedPhone), false), true},
-		{"private, allowed by the LID map", private(lidJID(allowedLID), types.EmptyJID, false), true},
-		{"private, not on the list", private(lidJID(otherLID), pnJID(otherPhone), false), false},
+		{"group in a route, sender in no route", group(enabledGroup, false), true},
+		{"group in a route, own message", group(enabledGroup, true), true},
+		{"group in another route", group(otherGroup, false), true},
+		{"group in no route", group(disabledGroup, false), false},
+		{"private, in a route by sender_alt", private(lidJID(otherLID), pnJID(allowedPhone), false), true},
+		{"private, in a route by the LID map", private(lidJID(allowedLID), types.EmptyJID, false), true},
+		{"private, in no route", private(lidJID(otherLID), pnJID(otherPhone), false), false},
 		// Own messages never carry text in private, whatever the sender resolves to.
 		{"private, own message", private(lidJID(allowedLID), pnJID(allowedPhone), true), false},
 		{"status broadcast from an allowed number", &events.Message{Info: types.MessageInfo{MessageSource: types.MessageSource{

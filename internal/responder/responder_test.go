@@ -12,28 +12,46 @@ import (
 const (
 	allowedPhone  = "5493624000001"
 	otherPhone    = "5493624000002"
+	secondPhone   = "5493624000003"
 	enabledGroup  = "120363000000000001@g.us"
 	disabledGroup = "120363000000000002@g.us"
+	secondGroup   = "120363000000000003@g.us"
 	privateChat   = "123456789012345@lid"
 )
 
-// fullConfig has every reply and template set. allowed_people and
-// enabled_groups hold allowedPhone and enabledGroup.
+// fullConfig has two routes. main has every reply and template set, for
+// allowedPhone and enabledGroup; otra, for secondPhone and secondGroup, only
+// answers ping, with its own reply. otherPhone and disabledGroup are in no
+// route.
 const fullConfig = `{
-	"keywords": {"ping": "pong"},
-	"default_reply": "No entendí.",
-	"image_ack": "Imagen {mimetype} {width}x{height} {size}",
-	"document_ack": "Archivo {name} {mimetype} {size} {pages}",
-	"allowed_people": ["5493624000001"],
-	"enabled_groups": ["120363000000000001@g.us"]
+	"routes": {
+		"main": {
+			"people": ["5493624000001"],
+			"groups": ["120363000000000001@g.us"],
+			"rules": {
+				"keywords": {"ping": "pong"},
+				"default_reply": "No entendí.",
+				"image_ack": "Imagen {mimetype} {width}x{height} {size}",
+				"document_ack": "Archivo {name} {mimetype} {size} {pages}"
+			}
+		},
+		"otra": {
+			"people": ["5493624000003"],
+			"groups": ["120363000000000003@g.us"],
+			"rules": {"keywords": {"ping": "pong desde otra"}}
+		}
+	}
 }`
 
 // sparseConfig has no default reply and no document confirmation.
 const sparseConfig = `{
-	"keywords": {"ping": "pong"},
-	"image_ack": "Imagen {size}",
-	"allowed_people": ["5493624000001"],
-	"enabled_groups": ["120363000000000001@g.us"]
+	"routes": {
+		"main": {
+			"people": ["5493624000001"],
+			"groups": ["120363000000000001@g.us"],
+			"rules": {"keywords": {"ping": "pong"}, "image_ack": "Imagen {size}"}
+		}
+	}
 }`
 
 func newResponder(t *testing.T, body string) *Responder {
@@ -80,21 +98,26 @@ const (
 	documentReply = "Archivo informe.pdf application/pdf 3.0 MB 4"
 )
 
-// result is what the bot does with a message: Admit's verdict and, for an
-// admitted message, what Answer decides.
+// result is what the bot does with a message: Admit's verdict and route and,
+// for an admitted message, what Answer decides.
 type result struct {
 	Admission Admission
+	Route     string
 	Decision  Decision
 }
 
 var (
-	ignored    = result{Admission: Ignored}
-	notEnabled = result{Admission: NotEnabled}
-	noMatch    = answered(Decision{Outcome: NoMatch})
-	pong       = answered(Decision{Outcome: Reply, Keyword: "ping", Reply: "pong"})
+	ignored      = result{Admission: Ignored}
+	noRoute      = result{Admission: NoRoute}
+	noMatch      = answered("main", Decision{Outcome: NoMatch})
+	pong         = answered("main", Decision{Outcome: Reply, Keyword: "ping", Reply: "pong"})
+	defaultReply = answered("main", Decision{Outcome: Reply, Default: true, Reply: "No entendí."})
+	otraPong     = answered("otra", Decision{Outcome: Reply, Keyword: "ping", Reply: "pong desde otra"})
 )
 
-func answered(d Decision) result { return result{Admission: Admitted, Decision: d} }
+func answered(route string, d Decision) result {
+	return result{Admission: Admitted, Route: route, Decision: d}
+}
 
 type decideCase struct {
 	name string
@@ -103,14 +126,17 @@ type decideCase struct {
 }
 
 // runDecide runs each message through Admit and, if it is admitted, through
-// Answer, the way the session does.
+// Answer with the route Admit chose, the way the session does.
 func runDecide(t *testing.T, r *Responder, tests []decideCase) {
 	t.Helper()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := result{Admission: r.Admit(tt.msg)}
+			var got result
+			got.Admission, got.Route = r.Admit(tt.msg)
 			if got.Admission == Admitted {
-				got.Decision = r.Answer(tt.msg)
+				msg := tt.msg
+				msg.Route = got.Route
+				got.Decision = r.Answer(msg)
 			}
 			if got != tt.want {
 				t.Errorf("got %+v, want %+v", got, tt.want)
@@ -142,68 +168,82 @@ func TestPrivate(t *testing.T) {
 	runDecide(t, newResponder(t, fullConfig), []decideCase{
 		{"keyword", privateText(allowedPhone, "ping"), pong},
 		{"keyword with case and spaces", privateText(allowedPhone, "  PING \n"), pong},
-		// The default reply is only for group tags.
-		{"other text", privateText(allowedPhone, "hola, ¿qué tal?"), noMatch},
+		// The default reply also answers in private chats.
+		{"other text", privateText(allowedPhone, "hola, ¿qué tal?"), defaultReply},
+		{"blank text", privateText(allowedPhone, "  "), defaultReply},
 		{"empty text", privateText(allowedPhone, ""), ignored},
-		{"sender not on the list", privateText(otherPhone, "ping"), ignored},
+		{"sender in no route", privateText(otherPhone, "ping"), ignored},
 		{"sender number not resolved", privateText("", "ping"), ignored},
+		// The number chooses the route.
+		{"sender in another route", privateText(secondPhone, "ping"), otraPong},
+		{"other text in a route without a default reply", privateText(secondPhone, "hola"), answered("otra", Decision{Outcome: NoMatch})},
 	})
 }
 
 func TestGroup(t *testing.T) {
-	defaultReply := answered(Decision{Outcome: Reply, Default: true, Reply: "No entendí."})
 	runDecide(t, newResponder(t, fullConfig), []decideCase{
 		{"keyword without tag", groupText(enabledGroup, "ping", false), ignored},
 		{"other text without tag", groupText(enabledGroup, "hola", false), ignored},
-		{"tag in a group not enabled", groupText(disabledGroup, " ping", true), notEnabled},
+		{"tag in a group in no route", groupText(disabledGroup, " ping", true), noRoute},
 		{"tag with keyword", groupText(enabledGroup, " ping", true), pong},
 		{"tag with other text", groupText(enabledGroup, " hola", true), defaultReply},
 		{"tag alone", groupText(enabledGroup, "", true), defaultReply},
-		// Groups do not use the allowed list.
-		{"tag from a sender not on the list", with(groupText(enabledGroup, " ping", true), func(m *Message) { m.SenderPhone = otherPhone }), pong},
+		{"tag in the other route's group", groupText(secondGroup, " ping", true), otraPong},
+		// In groups the route is the group's, whoever writes.
+		{"tag from a sender in no route", with(groupText(enabledGroup, " ping", true), func(m *Message) { m.SenderPhone = otherPhone }), pong},
 		{"tag from a sender without a resolved number", with(groupText(enabledGroup, " ping", true), func(m *Message) { m.SenderPhone = "" }), pong},
+		{"tag from a sender in another route", with(groupText(enabledGroup, " ping", true), func(m *Message) { m.SenderPhone = secondPhone }), pong},
+		{"tag in no route from a sender in a route", with(groupText(disabledGroup, " ping", true), func(m *Message) { m.SenderPhone = allowedPhone }), noRoute},
 	})
 }
 
 func TestFiles(t *testing.T) {
-	imageAck := answered(Decision{Outcome: FileAck, Reply: imageReply})
-	documentAck := answered(Decision{Outcome: FileAck, Reply: documentReply})
+	imageAck := answered("main", Decision{Outcome: FileAck, Reply: imageReply})
+	documentAck := answered("main", Decision{Outcome: FileAck, Reply: documentReply})
 	runDecide(t, newResponder(t, fullConfig), []decideCase{
 		{"private image", privateFile(allowedPhone, image()), imageAck},
 		{"private document", privateFile(allowedPhone, document()), documentAck},
-		{"private image from a sender not on the list", privateFile(otherPhone, image()), ignored},
+		{"private image from a sender in no route", privateFile(otherPhone, image()), ignored},
+		{"private image in a route that does not confirm images", privateFile(secondPhone, image()), answered("otra", Decision{Outcome: NoMatch})},
 		{"group image without tag", groupFile(enabledGroup, image(), false), ignored},
-		{"group image tagged in a group not enabled", groupFile(disabledGroup, image(), true), notEnabled},
+		{"group image tagged in a group in no route", groupFile(disabledGroup, image(), true), noRoute},
 		{"group image tagged", groupFile(enabledGroup, image(), true), imageAck},
 		{"group document tagged", groupFile(enabledGroup, document(), true), documentAck},
 		// A file is confirmed as a file; its text is not compared with the
-		// keywords.
+		// keywords, and the default reply does not answer it.
 		{"file with keyword text", with(privateFile(allowedPhone, image()), func(m *Message) { m.IsText = true; m.Text = "ping" }), imageAck},
 	})
 }
 
 func TestWithoutDefaultReplyOrTemplate(t *testing.T) {
 	runDecide(t, newResponder(t, sparseConfig), []decideCase{
+		{"private other text", privateText(allowedPhone, "hola"), noMatch},
 		{"tag with other text", groupText(enabledGroup, " hola", true), noMatch},
 		{"tag with keyword", groupText(enabledGroup, " ping", true), pong},
 		{"private document", privateFile(allowedPhone, document()), noMatch},
 		{"group document tagged", groupFile(enabledGroup, document(), true), noMatch},
-		{"private image still confirmed", privateFile(allowedPhone, image()), answered(Decision{Outcome: FileAck, Reply: "Imagen 2 KB"})},
+		{"private image still confirmed", privateFile(allowedPhone, image()), answered("main", Decision{Outcome: FileAck, Reply: "Imagen 2 KB"})},
 	})
 }
 
-// Who the bot attends is decided only by Admit. Answer trusts that the
-// message was admitted and does not look at the lists again.
-func TestAnswerDoesNotCheckAdmission(t *testing.T) {
+// Who the bot attends is decided only by Admit. Answer replies with the
+// rules of the route the message carries, and does not look at who sent it.
+func TestAnswerUsesTheRouteOfTheMessage(t *testing.T) {
 	r := newResponder(t, fullConfig)
+	routed := func(m Message, route string) Message { m.Route = route; return m }
 	tests := []struct {
 		name string
 		msg  Message
 		want Decision
 	}{
-		{"private text from a sender not on the list", privateText(otherPhone, "ping"), pong.Decision},
-		{"tag in a group not enabled", groupText(disabledGroup, " ping", true), pong.Decision},
-		{"group text without a tag", groupText(enabledGroup, " hola", false), Decision{Outcome: Reply, Default: true, Reply: "No entendí."}},
+		{"private text from a sender in no route", routed(privateText(otherPhone, "ping"), "main"), pong.Decision},
+		{"tag in a group in no route", routed(groupText(disabledGroup, " ping", true), "otra"), otraPong.Decision},
+		{"group text without a tag", routed(groupText(enabledGroup, " hola", false), "main"), defaultReply.Decision},
+		// The route is gone from the configuration, or the message never
+		// had one.
+		{"route not in the configuration", routed(privateText(allowedPhone, "ping"), "borrada"), Decision{Outcome: RouteMissing}},
+		{"no route", privateText(allowedPhone, "ping"), Decision{Outcome: RouteMissing}},
+		{"file with no route", privateFile(allowedPhone, image()), Decision{Outcome: RouteMissing}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -215,26 +255,36 @@ func TestAnswerDoesNotCheckAdmission(t *testing.T) {
 }
 
 func TestWithDelayNotice(t *testing.T) {
-	withNotice := newResponder(t, `{"delay_notice": "Perdón la demora."}`)
-	without := newResponder(t, `{}`)
+	r := newResponder(t, `{
+		"defaults": {"keywords": {"ping": "pong"}, "delay_notice": "Perdón la demora."},
+		"routes": {
+			"con": {"people": ["5493624000001"]},
+			"propio": {"people": ["5493624000002"], "rules": {"delay_notice": "Tarde, pero llego."}},
+			"sin": {"people": ["5493624000003"], "rules": {"delay_notice": ""}}
+		}
+	}`)
 	reply := Decision{Outcome: Reply, Keyword: "ping", Reply: "pong"}
 	ack := Decision{Outcome: FileAck, Reply: "Imagen 2 KB"}
 	none := Decision{Outcome: NoMatch}
+	missing := Decision{Outcome: RouteMissing}
 
 	tests := []struct {
-		name string
-		r    *Responder
-		in   Decision
-		want Decision
+		name  string
+		route string
+		in    Decision
+		want  Decision
 	}{
-		{"keyword reply", withNotice, reply, Decision{Outcome: Reply, Keyword: "ping", DelayNotice: true, Reply: "Perdón la demora.\n\npong"}},
-		{"file confirmation", withNotice, ack, Decision{Outcome: FileAck, DelayNotice: true, Reply: "Perdón la demora.\n\nImagen 2 KB"}},
-		{"nothing to reply", withNotice, none, none},
-		{"no notice configured", without, reply, reply},
+		{"keyword reply", "con", reply, Decision{Outcome: Reply, Keyword: "ping", DelayNotice: true, Reply: "Perdón la demora.\n\npong"}},
+		{"file confirmation", "con", ack, Decision{Outcome: FileAck, DelayNotice: true, Reply: "Perdón la demora.\n\nImagen 2 KB"}},
+		{"the route's own notice", "propio", reply, Decision{Outcome: Reply, Keyword: "ping", DelayNotice: true, Reply: "Tarde, pero llego.\n\npong"}},
+		{"nothing to reply", "con", none, none},
+		{"route not in the configuration", "con", missing, missing},
+		{"notice turned off in the route", "sin", reply, reply},
+		{"unknown route", "borrada", reply, reply},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.r.WithDelayNotice(tt.in); got != tt.want {
+			if got := r.WithDelayNotice(tt.route, tt.in); got != tt.want {
 				t.Errorf("WithDelayNotice() = %+v, want %+v", got, tt.want)
 			}
 		})
@@ -269,8 +319,14 @@ func TestFormatSize(t *testing.T) {
 		{kb + kb/2 - 1, "1 KB"},
 		{kb + kb/2, "2 KB"},
 		{10 * kb, "10 KB"},
+		// Sizes that would round up to 1024 of a unit go in the next one.
+		{mb - kb/2 - 1, "1023 KB"},
+		{mb - kb/2, "1.0 MB"},
+		{mb - 1, "1.0 MB"},
 		{mb, "1.0 MB"},
 		{mb + mb/2, "1.5 MB"},
+		{1073636966, "1023.9 MB"},
+		{gb - 1, "1.0 GB"},
 		{gb, "1.0 GB"},
 		{2*gb + gb/2, "2.5 GB"},
 	}

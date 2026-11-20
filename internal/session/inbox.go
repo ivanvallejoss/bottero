@@ -75,6 +75,7 @@ func (in *inbox) handle(rawEvt any) (handled bool) {
 
 	info := evt.Info
 	base := []any{"id", info.ID, "chat", info.Chat.String()}
+	var media []any
 
 	// whatsmeow counts a panic in a handler as success and confirms the
 	// message, which would then be lost. As a failure, it comes back on the
@@ -93,16 +94,19 @@ func (in *inbox) handle(rawEvt any) (handled bool) {
 
 	msg, how := reduce(ctx, in.device, evt)
 	if msg.Media != nil {
-		base = append(base, "media", string(msg.Media.Kind))
+		media = []any{"media", string(msg.Media.Kind)}
 	}
 
-	switch in.responder.Admit(msg) {
+	admission, route := in.responder.Admit(msg)
+	switch admission {
 	case responder.Ignored:
 		return true
-	case responder.NotEnabled:
-		in.log.Info("decision", concat([]any{"outcome", "group_not_enabled"}, base, how)...)
+	case responder.NoRoute:
+		in.log.Info("decision", concat([]any{"outcome", "no_route"}, base, media, how)...)
 		return true
 	}
+	msg.Route = route
+	base = concat(base, []any{"route", route}, media)
 
 	saved, err := newSavedMessage(evt, msg, how)
 	if err != nil {
@@ -144,16 +148,19 @@ func (in *inbox) close() {
 }
 
 // includeText is the event log's content filter: private messages from
-// people on the allowed list, and every message in an enabled group, are
-// logged with their text.
+// people who are in a route, and every message in a group that is in a
+// route, are logged with their text. It looks up the route the same way
+// Admit does.
 func (in *inbox) includeText(evt *events.Message) bool {
 	info := evt.Info
 	if info.Chat.Server == types.GroupServer {
-		return in.cfg.IsEnabledGroup(info.Chat.String())
+		_, ok := in.cfg.GroupRoute(info.Chat.String())
+		return ok
 	}
 	if info.IsFromMe || !isPrivate(info.Chat) {
 		return false
 	}
 	phone, _ := senderPhone(context.Background(), in.device.LIDs, info)
-	return in.cfg.IsAllowedPerson(phone)
+	_, ok := in.cfg.PersonRoute(phone)
+	return ok
 }

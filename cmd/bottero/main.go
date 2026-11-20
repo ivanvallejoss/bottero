@@ -1,11 +1,13 @@
 // Command bottero is a WhatsApp bot built on whatsmeow. It pairs with a
 // dedicated number, keeps the session on disk, logs every event whatsmeow
-// delivers and answers keywords with fixed replies.
+// delivers and answers keywords with fixed replies, with the rules of the
+// route each chat belongs to.
 //
 // Usage:
 //
 //	bottero pair -phone 549XXXXXXXXXX   link the number using a pairing code
 //	bottero run                          connect, log events and answer until stopped
+//	bottero check                        validate the configuration and describe its routes
 package main
 
 import (
@@ -33,7 +35,7 @@ const (
 // Exit codes. The systemd unit restarts the service on failure, except on
 // exitSessionEnded and exitConfig (RestartPreventExitStatus=3 4): without a
 // valid session, after WhatsApp ended it, or with a broken configuration,
-// restarting does not help.
+// restarting does not help. check exits with exitConfig too.
 const (
 	exitError        = 1
 	exitUsage        = 2
@@ -58,6 +60,8 @@ func main() {
 		err = pairCmd(ctx, logger, os.Args[2:])
 	case "run":
 		err = runCmd(ctx, logger, os.Args[2:])
+	case "check":
+		err = checkCmd(logger, os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -85,10 +89,13 @@ func usage() {
 	fmt.Fprint(os.Stderr, `Usage:
   bottero pair -phone 549XXXXXXXXXX [-data-dir DIR]
   bottero run [-config FILE] [-data-dir DIR]
+  bottero check [-config FILE]
 
 Commands:
   pair   link the dedicated number as a companion device using a pairing code
   run    connect with the stored session, log every event and answer keywords
+  check  validate the configuration and describe its routes, without touching
+         the session or the running service
 `)
 }
 
@@ -125,18 +132,16 @@ func pairCmd(ctx context.Context, logger *slog.Logger, args []string) error {
 
 func runCmd(ctx context.Context, logger *slog.Logger, args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	configPath := fs.String("config", defaultConfig, "configuration file (keywords, allowed people, enabled groups)")
+	configPath := fs.String("config", defaultConfig, "configuration file (routes and their rules)")
 	dataDir := fs.String("data-dir", defaultDataDir, "directory that holds the SQLite databases")
 	_ = fs.Parse(args)
 
 	logger.Info("starting", "component", "bottero", "data_dir", *dataDir, "config", *configPath, "whatsmeow", whatsmeowVersion())
 
-	cfg, err := config.Load(*configPath)
+	cfg, err := loadConfig(logger, *configPath)
 	if err != nil {
 		return err
 	}
-	keywords, people, groups := cfg.Summary()
-	logger.Info("configuration loaded", "component", "bottero", "keywords", keywords, "allowed_people", people, "enabled_groups", groups)
 
 	st, err := state.Open(ctx, *dataDir)
 	if err != nil {
@@ -152,6 +157,40 @@ func runCmd(ctx context.Context, logger *slog.Logger, args []string) error {
 	defer container.Close()
 
 	return session.Run(ctx, container, waLogger, logger, cfg, st)
+}
+
+// checkCmd loads the configuration and logs the same lines as the start of
+// run, so a change can be checked before restarting the service: a broken
+// configuration stops the service, and systemd does not restart it.
+func checkCmd(logger *slog.Logger, args []string) error {
+	fs := flag.NewFlagSet("check", flag.ExitOnError)
+	configPath := fs.String("config", defaultConfig, "configuration file (routes and their rules)")
+	_ = fs.Parse(args)
+
+	if _, err := loadConfig(logger, *configPath); err != nil {
+		return err
+	}
+	logger.Info("configuration is valid", "component", "bottero", "config", *configPath)
+	return nil
+}
+
+// loadConfig loads the configuration and logs one line for it and one per
+// route: how many people, groups and keywords it has, and where each of its
+// texts comes from (own, inherited or off). No phone numbers or group JIDs.
+func loadConfig(logger *slog.Logger, path string) (*config.Config, error) {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return nil, err
+	}
+	routes := cfg.Routes()
+	logger.Info("configuration loaded", "component", "bottero", "routes", len(routes))
+	for _, r := range routes {
+		logger.Info("route loaded", "component", "bottero", "route", r.Name,
+			"people", r.People, "groups", r.Groups, "keywords", r.Keywords, "own_keywords", r.OwnKeywords,
+			"default_reply", string(r.DefaultReply), "image_ack", string(r.ImageAck),
+			"document_ack", string(r.DocumentAck), "delay_notice", string(r.DelayNotice))
+	}
+	return cfg, nil
 }
 
 // whatsmeowVersion reports the whatsmeow module version compiled into the

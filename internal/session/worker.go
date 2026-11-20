@@ -199,6 +199,7 @@ func (w *worker) attend(ctx context.Context, job state.Job) result {
 	if err != nil {
 		return w.finish(db, job, "failed", base, []any{"err", err})
 	}
+	base = append(base, "route", saved.Route)
 	if saved.Media != nil {
 		base = append(base, "media", string(saved.Media.Kind))
 	}
@@ -210,6 +211,9 @@ func (w *worker) attend(ctx context.Context, job state.Job) result {
 
 	built, ok, err := w.prepare(db, &job, saved)
 	var unusable unusableError
+	if errors.Is(err, errRouteMissing) {
+		return w.finish(db, job, "route_missing", base, how)
+	}
 	if errors.As(err, &unusable) {
 		return w.finish(db, job, "failed", base, how, []any{"err", err})
 	}
@@ -272,11 +276,18 @@ type unusableError struct{ err error }
 func (e unusableError) Error() string { return e.err.Error() }
 func (e unusableError) Unwrap() error { return e.err }
 
+// errRouteMissing is what prepare returns when the message's route is not in
+// the configuration: the route was removed or renamed after the message was
+// saved, or the message was saved by a version without routes. The message
+// closes without an answer, as a chat that is in no route.
+var errRouteMissing = errors.New("route not in the configuration")
+
 // prepare returns the reply to send for job, and false if there is nothing
 // to answer. The first time, it asks the responder, builds the reply, fixes
 // its id and stores both before anything is sent. Later attempts, also after
-// a restart, get the stored ones. Any error other than an unusableError
-// comes from the state database.
+// a restart, get the stored ones, without looking at the configuration. Any
+// error other than errRouteMissing or an unusableError comes from the state
+// database.
 func (w *worker) prepare(db context.Context, job *state.Job, saved savedMessage) (builtReply, bool, error) {
 	if job.Sending() {
 		built, err := decodeBuilt(job.Reply)
@@ -287,11 +298,14 @@ func (w *worker) prepare(db context.Context, job *state.Job, saved savedMessage)
 	}
 
 	decision := w.responder.Answer(saved.message())
-	if decision.Outcome == responder.NoMatch {
+	switch decision.Outcome {
+	case responder.RouteMissing:
+		return builtReply{}, false, errRouteMissing
+	case responder.NoMatch:
 		return builtReply{}, false, nil
 	}
 	if w.now().Sub(job.Sent) >= lateAfter {
-		decision = w.responder.WithDelayNotice(decision)
+		decision = w.responder.WithDelayNotice(saved.Route, decision)
 	}
 	out, err := saved.reply(job.MessageID, decision.Reply)
 	if err != nil {

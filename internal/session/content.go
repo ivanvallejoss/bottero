@@ -16,8 +16,11 @@ import (
 // saved: what Answer reads, what a group reply quotes, and the attributes of
 // the decision log. It is stored as JSON in state.db while the message is
 // open, and erased when it closes. The sender's phone number and the rest of
-// the message are not kept: Admit already used them.
+// the message are not kept: Admit already used them to choose the route.
 type savedMessage struct {
+	// Route is the route Admit chose. The worker looks it up by name in the
+	// configuration it has when it takes the message.
+	Route string           `json:"route,omitempty"`
 	Group bool             `json:"group,omitempty"`
 	Text  string           `json:"text,omitempty"`
 	Media *responder.Media `json:"media,omitempty"`
@@ -33,7 +36,7 @@ type savedMessage struct {
 
 // newSavedMessage keeps from an admitted message what the worker needs.
 func newSavedMessage(evt *events.Message, msg responder.Message, how []any) (savedMessage, error) {
-	s := savedMessage{Group: msg.Group, Text: msg.Text, Media: msg.Media}
+	s := savedMessage{Route: msg.Route, Group: msg.Group, Text: msg.Text, Media: msg.Media}
 	for _, v := range how {
 		s.Recognized = append(s.Recognized, fmt.Sprint(v))
 	}
@@ -51,7 +54,7 @@ func newSavedMessage(evt *events.Message, msg responder.Message, how []any) (sav
 // message is what Answer receives: the same fields reduce gave it when the
 // message arrived.
 func (s savedMessage) message() responder.Message {
-	return responder.Message{Private: !s.Group, Group: s.Group, Text: s.Text, Media: s.Media}
+	return responder.Message{Private: !s.Group, Group: s.Group, Text: s.Text, Media: s.Media, Route: s.Route}
 }
 
 // how returns the attributes of the decision log that say how the sender or

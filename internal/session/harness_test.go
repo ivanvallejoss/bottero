@@ -23,24 +23,39 @@ import (
 	"github.com/ivanvallejoss/bottero/internal/state"
 )
 
-// testConfig answers "ping" in private and in the enabled group, has a
-// default reply and confirms images.
+// testConfig has one route, main, for the allowed person and the enabled
+// group: it answers "ping", has a default reply and confirms images.
 const testConfig = `{
-	"keywords": {"ping": "pong"},
-	"default_reply": "No entendí.",
-	"image_ack": "Imagen {size}",
-	"allowed_people": ["` + allowedPhone + `"],
-	"enabled_groups": ["` + enabledGroup + `"]
+	"routes": {
+		"main": {
+			"people": ["` + allowedPhone + `"],
+			"groups": ["` + enabledGroup + `"],
+			"rules": {"keywords": {"ping": "pong"}, "default_reply": "No entendí.", "image_ack": "Imagen {size}"}
+		}
+	}
 }`
 
 // testConfigWithNotice is testConfig with a delay notice.
 const testConfigWithNotice = `{
-	"keywords": {"ping": "pong"},
-	"default_reply": "No entendí.",
-	"image_ack": "Imagen {size}",
-	"delay_notice": "Perdón la demora.",
-	"allowed_people": ["` + allowedPhone + `"],
-	"enabled_groups": ["` + enabledGroup + `"]
+	"routes": {
+		"main": {
+			"people": ["` + allowedPhone + `"],
+			"groups": ["` + enabledGroup + `"],
+			"rules": {"keywords": {"ping": "pong"}, "default_reply": "No entendí.", "image_ack": "Imagen {size}",
+				"delay_notice": "Perdón la demora."}
+		}
+	}
+}`
+
+// testConfigWithoutDefault is testConfig without the default reply.
+const testConfigWithoutDefault = `{
+	"routes": {
+		"main": {
+			"people": ["` + allowedPhone + `"],
+			"groups": ["` + enabledGroup + `"],
+			"rules": {"keywords": {"ping": "pong"}, "image_ack": "Imagen {size}"}
+		}
+	}
 }`
 
 func loadConfig(t *testing.T, body string) *config.Config {

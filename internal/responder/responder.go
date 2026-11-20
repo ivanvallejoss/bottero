@@ -1,8 +1,9 @@
 // Package responder decides what the bot answers, in two steps. Admit says
-// whether the bot attends a message at all; Answer says what it replies to a
-// message Admit accepted. It knows nothing about whatsmeow or the
-// connection: it receives a message already reduced to the fields that
-// matter.
+// whether the bot attends a message at all and, if it does, which route of
+// the configuration it belongs to; Answer says what it replies to a message
+// Admit accepted, with the rules of that route. It knows nothing about
+// whatsmeow or the connection: it receives a message already reduced to the
+// fields that matter.
 //
 // Admit only reads the configuration and is instant, so the session can run
 // it as soon as a message arrives. Answer is the part that can later be
@@ -21,12 +22,12 @@ type Message struct {
 	// Private is true for a one-to-one chat; Group for a group chat.
 	Private bool
 	Group   bool
-	// Chat is the chat JID. For groups it is compared with the enabled list.
+	// Chat is the chat JID. For groups it chooses the route.
 	Chat string
 	// FromMe is true for messages sent by the bot's own number.
 	FromMe bool
 	// SenderPhone is the sender's phone number, digits only, or "" if it
-	// could not be resolved. Used in private chats.
+	// could not be resolved. In private chats it chooses the route.
 	SenderPhone string
 	// IsText is true for a plain or extended text message.
 	IsText bool
@@ -40,6 +41,8 @@ type Message struct {
 	// Mentioned is true when the message (or the file's caption) explicitly
 	// mentions the bot.
 	Mentioned bool
+	// Route is the route Admit chose. Answer replies with its rules.
+	Route string
 }
 
 // MediaKind is the kind of file the bot confirms.
@@ -68,14 +71,13 @@ type Admission int
 
 const (
 	// Ignored: not something the bot considers (own message, edit, private
-	// sender not on the list, empty private text, group message without a
-	// tag, other kinds of messages). Not logged as a decision.
+	// sender in no route, empty private text, group message without a tag,
+	// other kinds of messages). Not logged as a decision.
 	Ignored Admission = iota
 	// Admitted: the bot attends the message. Answer decides what to reply.
 	Admitted
-	// NotEnabled: the bot was tagged in a group that is not on the enabled
-	// list. Silence.
-	NotEnabled
+	// NoRoute: the bot was tagged in a group that is in no route. Silence.
+	NoRoute
 )
 
 // Outcome is the kind of answer.
@@ -89,6 +91,9 @@ const (
 	Reply
 	// FileAck: confirm an image or document with Decision.Reply.
 	FileAck
+	// RouteMissing: the message's route is not in the configuration (it was
+	// removed or renamed after the message was saved). Silence.
+	RouteMissing
 )
 
 // Decision is the result of Answer.
@@ -115,79 +120,87 @@ func New(cfg *config.Config) *Responder {
 	return &Responder{cfg: cfg}
 }
 
-// Admit reports whether the bot attends m. In private chats it attends
-// people on the allowed list, for texts and files; in groups, any member who
-// tags the bot, if the group is on the enabled list.
-func (r *Responder) Admit(m Message) Admission {
+// Admit reports whether the bot attends m and, if it does, the route it
+// belongs to. In private chats it attends the people who are in a route, for
+// texts and files; in groups, any member who tags the bot, if the group is in
+// a route. The route of a private chat is chosen by the person's number; that
+// of a group, by the group alone.
+func (r *Responder) Admit(m Message) (Admission, string) {
 	if m.FromMe || m.IsEdit {
-		return Ignored
+		return Ignored, ""
 	}
 	if m.Media == nil && !m.IsText {
-		return Ignored
+		return Ignored, ""
 	}
 	switch {
 	case m.Private:
 		// A text needs something to compare with the keywords. A file is
 		// confirmed whatever its caption says.
 		if m.Media == nil && m.Text == "" {
-			return Ignored
+			return Ignored, ""
 		}
-		if !r.cfg.IsAllowedPerson(m.SenderPhone) {
-			return Ignored
+		route, ok := r.cfg.PersonRoute(m.SenderPhone)
+		if !ok {
+			return Ignored, ""
 		}
-		return Admitted
+		return Admitted, route
 	case m.Group:
 		if !m.Mentioned {
-			return Ignored
+			return Ignored, ""
 		}
-		if !r.cfg.IsEnabledGroup(m.Chat) {
-			return NotEnabled
+		route, ok := r.cfg.GroupRoute(m.Chat)
+		if !ok {
+			return NoRoute, ""
 		}
-		return Admitted
+		return Admitted, route
 	default:
-		return Ignored
+		return Ignored, ""
 	}
 }
 
-// Answer decides what to reply to a message Admit admitted: the keyword's
-// reply if the whole text matches one; in groups, otherwise the default
-// reply; for an image or document, its confirmation. A file's caption is not
-// matched against the keywords.
+// Answer decides what to reply to a message Admit admitted, with the rules
+// of its route: the keyword's reply if the whole text matches one, otherwise
+// the default reply; for an image or document, its confirmation. A file's
+// caption is not matched against the keywords.
 func (r *Responder) Answer(m Message) Decision {
-	if m.Media != nil {
-		return r.answerFile(*m.Media)
+	rules, ok := r.cfg.Rules(m.Route)
+	if !ok {
+		return Decision{Outcome: RouteMissing}
 	}
-	if keyword, reply, ok := r.cfg.Reply(m.Text); ok {
+	if m.Media != nil {
+		return answerFile(rules, *m.Media)
+	}
+	if keyword, reply, ok := rules.Reply(m.Text); ok {
 		return Decision{Outcome: Reply, Keyword: keyword, Reply: reply}
 	}
-	// The default reply is only for group tags.
-	if m.Group {
-		if reply := r.cfg.DefaultReply(); reply != "" {
-			return Decision{Outcome: Reply, Default: true, Reply: reply}
-		}
+	if reply := rules.DefaultReply(); reply != "" {
+		return Decision{Outcome: Reply, Default: true, Reply: reply}
 	}
 	return Decision{Outcome: NoMatch}
 }
 
-// WithDelayNotice returns d for a reply that goes out late: the configured
-// delay notice first, a blank line, and then the reply, all in one message.
-// With no notice configured, or nothing to reply, d is returned as it is.
-func (r *Responder) WithDelayNotice(d Decision) Decision {
-	notice := r.cfg.DelayNotice()
-	if notice == "" || d.Outcome == NoMatch {
+// WithDelayNotice returns d for a reply that goes out late: the delay notice
+// of route first, a blank line, and then the reply, all in one message. With
+// no notice in the route, or nothing to reply, d is returned as it is.
+func (r *Responder) WithDelayNotice(route string, d Decision) Decision {
+	if d.Outcome != Reply && d.Outcome != FileAck {
 		return d
 	}
-	d.Reply = notice + "\n\n" + d.Reply
+	rules, ok := r.cfg.Rules(route)
+	if !ok || rules.DelayNotice() == "" {
+		return d
+	}
+	d.Reply = rules.DelayNotice() + "\n\n" + d.Reply
 	d.DelayNotice = true
 	return d
 }
 
 // answerFile confirms an image or document with its template, filled with
 // the file's metadata.
-func (r *Responder) answerFile(media Media) Decision {
-	tmpl := r.cfg.DocumentAck()
+func answerFile(rules *config.Rules, media Media) Decision {
+	tmpl := rules.DocumentAck()
 	if media.Kind == Image {
-		tmpl = r.cfg.ImageAck()
+		tmpl = rules.ImageAck()
 	}
 	if tmpl == "" {
 		return Decision{Outcome: NoMatch}
@@ -223,7 +236,9 @@ func number(n uint32) string {
 	return fmt.Sprint(n)
 }
 
-// formatSize writes a byte count the way WhatsApp shows file sizes.
+// formatSize writes a byte count the way WhatsApp shows file sizes. A size
+// that would round up to 1024 of a unit is written in the next one: "1.0 MB",
+// not "1024 KB".
 func formatSize(n uint64) string {
 	const kb, mb, gb = 1024, 1024 * 1024, 1024 * 1024 * 1024
 	switch {
@@ -231,9 +246,9 @@ func formatSize(n uint64) string {
 		return "?"
 	case n < kb:
 		return fmt.Sprintf("%d B", n)
-	case n < mb:
+	case n < mb-kb/2:
 		return fmt.Sprintf("%d KB", (n+kb/2)/kb)
-	case n < gb:
+	case float64(n)/mb < 1023.95:
 		return fmt.Sprintf("%.1f MB", float64(n)/mb)
 	default:
 		return fmt.Sprintf("%.1f GB", float64(n)/gb)

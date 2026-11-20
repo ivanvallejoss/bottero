@@ -1,13 +1,19 @@
 {
-  "keywords": {
-    "hola": "¡Hola! Soy bottero, un bot de prueba. Escribí \"ayuda\" para ver qué entiendo.",
-    "ayuda": "Palabras que entiendo: hola, ayuda, ping. También confirmo imágenes y archivos.",
-    "ping": "pong"
+  "defaults": {
+    "keywords": {
+      "hola": "¡Hola! Soy bottero, un bot de prueba. Escribí \"ayuda\" para ver qué entiendo.",
+      "ayuda": "Palabras que entiendo: hola, ayuda, ping. También confirmo imágenes y archivos.",
+      "ping": "pong"
+    },
+    "default_reply": "No entendí. Probá con: hola, ayuda, ping.",
+    "image_ack": "Recibí tu imagen: {mimetype}, {width}×{height}, {size}.",
+    "document_ack": "Recibí tu archivo {name}: {mimetype}, {size}.",
+    "delay_notice": "Perdón la demora, recién vuelvo a estar en línea."
   },
-  "default_reply": "No entendí. Probá con: hola, ayuda, ping.",
-  "image_ack": "Recibí tu imagen: {mimetype}, {width}×{height}, {size}.",
-  "document_ack": "Recibí tu archivo {name}: {mimetype}, {size}.",
-  "delay_notice": "Perdón la demora, recién vuelvo a estar en línea.",
-  "allowed_people": ["549XXXXXXXXXX"],
-  "enabled_groups": []
+  "routes": {
+    "personal": {
+      "people": ["549XXXXXXXXXX"],
+      "groups": []
+    }
+  }
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,8 +22,9 @@ import (
 // These measurements show how long the handler takes per message and how
 // much of it is the admission: everything before the save in state.db. They
 // were written before the routing by chat, to compare the same numbers before
-// and after it. On the homelab, set TMPDIR to a directory on the hard drive;
-// elsewhere they only show that the measurement runs.
+// and after it; BenchmarkAnswer measures the worker's side of the routing. On
+// the homelab, set TMPDIR to a directory on the hard drive; elsewhere they
+// only show that the measurement runs.
 
 // timedMessages is how many messages TestHandlerTimes passes through the
 // handler. At about 45 ms per save on the homelab's hard drive, it takes some
@@ -56,45 +58,106 @@ func TestHandlerTimes(t *testing.T) {
 }
 
 // BenchmarkAdmission measures what the bot does with a message before
-// saving it: the event log's text filter, reducing the message, Admit, and
-// encoding what is saved. The handler adds the save to this.
+// saving it: the event log's text filter, reducing the message, Admit with
+// its choice of route, and encoding what is saved. The handler adds the save
+// to this. It runs with testConfig's single route and with fifty more routes
+// of ten chats each, to show the choice of route does not grow with the
+// configuration.
 func BenchmarkAdmission(b *testing.B) {
-	path := filepath.Join(b.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(testConfig), 0o600); err != nil {
-		b.Fatal(err)
-	}
-	cfg, err := config.Load(path)
-	if err != nil {
-		b.Fatal(err)
-	}
-	// No store: the benchmark stops before the save.
-	in := newInbox(testDevice(), cfg, responder.New(cfg), nil, slog.New(slog.DiscardHandler), func() {})
-	ctx := context.Background()
-	// groupTag only reads the harness clock.
-	events0 := &harness{now: t0}
-	cases := []struct {
+	events0 := &harness{now: t0} // groupTag only reads the harness clock
+	messages := []struct {
 		name string
 		evt  *events.Message
 	}{
 		{"private", privateFromPhone(t0, "3AP0001", "ping")},
 		{"group", events0.groupTag(enabledGroup, "3AG0001", "ping")},
 	}
-	for _, c := range cases {
-		b.Run(c.name, func(b *testing.B) {
+	ctx := context.Background()
+	for _, m := range messages {
+		for _, size := range benchSizes() {
+			b.Run(m.name+"/"+size.name, func(b *testing.B) {
+				cfg := benchLoad(b, size.body)
+				// No store: the benchmark stops before the save.
+				in := newInbox(testDevice(), cfg, responder.New(cfg), nil, slog.New(slog.DiscardHandler), func() {})
+				for b.Loop() {
+					in.includeText(m.evt)
+					msg, how := reduce(ctx, in.device, m.evt)
+					admission, route := in.responder.Admit(msg)
+					if admission != responder.Admitted {
+						b.Fatalf("message not admitted: %v", admission)
+					}
+					msg.Route = route
+					saved, err := newSavedMessage(m.evt, msg, how)
+					if err != nil {
+						b.Fatal(err)
+					}
+					if _, err := encode(saved); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
+	}
+}
+
+// BenchmarkAnswer measures what the worker does with a saved message before
+// building the reply: reading what was saved, finding the rules of its
+// route and choosing the answer.
+func BenchmarkAnswer(b *testing.B) {
+	content, err := encode(savedMessage{Route: "main", Text: "ping", Recognized: []string{"matched_via", "sender_alt"}})
+	if err != nil {
+		b.Fatal(err)
+	}
+	for _, size := range benchSizes() {
+		b.Run(size.name, func(b *testing.B) {
+			resp := responder.New(benchLoad(b, size.body))
 			for b.Loop() {
-				in.includeText(c.evt)
-				msg, how := reduce(ctx, in.device, c.evt)
-				in.responder.Admit(msg)
-				saved, err := newSavedMessage(c.evt, msg, how)
+				saved, err := decodeSaved(content)
 				if err != nil {
 					b.Fatal(err)
 				}
-				if _, err := encode(saved); err != nil {
-					b.Fatal(err)
+				if d := resp.Answer(saved.message()); d.Outcome != responder.Reply {
+					b.Fatalf("answer = %+v", d)
 				}
 			}
 		})
 	}
+}
+
+// benchSizes are the configurations the benchmarks run with: testConfig,
+// and testConfig's route plus fifty routes of five people and five groups.
+func benchSizes() []struct{ name, body string } {
+	var routes strings.Builder
+	for r := range 50 {
+		people, groups := make([]string, 5), make([]string, 5)
+		for c := range 5 {
+			people[c] = fmt.Sprintf(`"549362%07d"`, r*5+c)
+			groups[c] = fmt.Sprintf(`"120363%012d@g.us"`, 100+r*5+c)
+		}
+		fmt.Fprintf(&routes, `"r%02d": {"people": [%s], "groups": [%s], "rules": {"keywords": {"ping": "pong %d"}}},`,
+			r, strings.Join(people, ","), strings.Join(groups, ","), r)
+	}
+	large := `{"routes": {` + routes.String() + `
+		"main": {
+			"people": ["` + allowedPhone + `"],
+			"groups": ["` + enabledGroup + `"],
+			"rules": {"keywords": {"ping": "pong"}, "default_reply": "No entendí.", "image_ack": "Imagen {size}"}
+		}
+	}}`
+	return []struct{ name, body string }{{"1-route", testConfig}, {"51-routes", large}}
+}
+
+func benchLoad(b *testing.B, body string) *config.Config {
+	b.Helper()
+	path := filepath.Join(b.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		b.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		b.Fatal(err)
+	}
+	return cfg
 }
 
 // privateFromPhone is a private text as it arrives from a phone: the sender

@@ -32,7 +32,7 @@ func TestWorkerRepliesInPrivate(t *testing.T) {
 	if s.to != lidJID(allowedLID) || s.msg.GetConversation() != "pong" || s.id == "" {
 		t.Errorf("sent %q to %s with id %q", s.msg.GetConversation(), s.to, s.id)
 	}
-	h.log.wantLine(t, "outcome=replied", "id=3A01", "matched_via=lid_map", "keyword=ping", "default_reply=false",
+	h.log.wantLine(t, "outcome=replied", "id=3A01", "route=main", "matched_via=lid_map", "keyword=ping", "default_reply=false",
 		"reply_id="+string(s.id), "attempt=1", "waited=2s")
 	h.wantNothingOpen()
 
@@ -62,8 +62,8 @@ func TestWorkerQuotesInGroups(t *testing.T) {
 			t.Errorf("reply to %s = %v", want.id, sends[i].msg)
 		}
 	}
-	h.log.wantLine(t, "outcome=replied", "id=3A02", "mentioned_as=lid", "keyword=ping")
-	h.log.wantLine(t, "outcome=replied", "id=3A03", "keyword=", "default_reply=true")
+	h.log.wantLine(t, "outcome=replied", "id=3A02", "route=main", "mentioned_as=lid", "keyword=ping")
+	h.log.wantLine(t, "outcome=replied", "id=3A03", "route=main", "keyword=", "default_reply=true")
 }
 
 func TestWorkerConfirmsFiles(t *testing.T) {
@@ -74,17 +74,112 @@ func TestWorkerConfirmsFiles(t *testing.T) {
 	if len(sends) != 1 || sends[0].msg.GetConversation() != "Imagen 2 KB" {
 		t.Fatalf("sends = %v", sends)
 	}
-	h.log.wantLine(t, "outcome=file_ack", "id=3A04", "media=image", "attempt=1")
+	h.log.wantLine(t, "outcome=file_ack", "id=3A04", "route=main", "media=image", "attempt=1")
+}
+
+// In private chats too, a text that matches no keyword gets the default
+// reply: the person sees the bot is there and did not understand.
+func TestWorkerUsesTheDefaultReplyInPrivate(t *testing.T) {
+	h := newHarness(t, testConfig)
+	h.receive(h.privateText("3A05", "hola, ¿qué tal?"))
+	h.pass()
+	if sends := h.sender.all(); len(sends) != 1 || sends[0].msg.GetConversation() != "No entendí." {
+		t.Fatalf("sends = %v, want the default reply", sends)
+	}
+	h.log.wantLine(t, "outcome=replied", "id=3A05", "route=main", "keyword=", "default_reply=true")
 }
 
 func TestWorkerStaysSilentWithNoMatch(t *testing.T) {
-	h := newHarness(t, testConfig)
+	h := newHarness(t, testConfigWithoutDefault)
 	h.receive(h.privateText("3A05", "hola, ¿qué tal?"))
 	h.pass()
 	if sends := h.sender.all(); len(sends) != 0 {
 		t.Fatalf("sends = %v, want none", sends)
 	}
-	h.log.wantLine(t, "outcome=no_match", "id=3A05", "matched_via=lid_map")
+	h.log.wantLine(t, "outcome=no_match", "id=3A05", "route=main", "matched_via=lid_map")
+	h.wantNothingOpen()
+}
+
+// Each chat gets the rules of its route, and the log says which.
+func TestWorkerAnswersWithTheRulesOfEachRoute(t *testing.T) {
+	h := newHarness(t, `{
+		"defaults": {"keywords": {"ping": "pong"}},
+		"routes": {
+			"personal": {"people": ["`+allowedPhone+`"]},
+			"grupo": {"groups": ["`+enabledGroup+`"], "rules": {"keywords": {"ping": "pong del grupo"}}}
+		}
+	}`)
+	h.receive(h.privateText("3A31", "ping"))
+	h.receive(h.groupTag(enabledGroup, "3A32", "ping"))
+	h.pass()
+
+	sends := h.sender.all()
+	if len(sends) != 2 {
+		t.Fatalf("%d sends, want 2", len(sends))
+	}
+	if got := sends[0].msg.GetConversation(); got != "pong" {
+		t.Errorf("private reply = %q, want pong", got)
+	}
+	if got := sends[1].msg.GetExtendedTextMessage().GetText(); got != "pong del grupo" {
+		t.Errorf("group reply = %q, want the group route's", got)
+	}
+	h.log.wantLine(t, "outcome=queued", "id=3A31", "route=personal")
+	h.log.wantLine(t, "outcome=replied", "id=3A31", "route=personal", "keyword=ping")
+	h.log.wantLine(t, "outcome=queued", "id=3A32", "route=grupo")
+	h.log.wantLine(t, "outcome=replied", "id=3A32", "route=grupo", "keyword=ping")
+}
+
+// The route's rules are those of the configuration the worker has when it
+// takes the message: a change before a restart applies to a message that
+// was waiting.
+func TestWorkerAnswersWithTheCurrentRulesOfTheRoute(t *testing.T) {
+	h := newHarness(t, testConfig)
+	h.receive(h.privateText("3A33", "ping"))
+	h.restart(`{"routes": {"main": {"people": ["` + allowedPhone + `"], "rules": {"keywords": {"ping": "pong nuevo"}}}}}`)
+	h.pass()
+	if sends := h.sender.all(); len(sends) != 1 || sends[0].msg.GetConversation() != "pong nuevo" {
+		t.Fatalf("sends = %v, want the new reply", sends)
+	}
+	h.log.wantLine(t, "outcome=replied", "id=3A33", "route=main")
+}
+
+// A message whose route was removed or renamed while it waited closes
+// without an answer, as a chat in no route.
+func TestWorkerClosesMessagesWhoseRouteIsGone(t *testing.T) {
+	h := newHarness(t, testConfig)
+	h.receive(h.privateText("3A34", "ping"))
+	h.receive(h.groupTag(enabledGroup, "3A35", "ping"))
+	h.restart(`{"routes": {"personal": {"people": ["` + allowedPhone + `"], "groups": ["` + enabledGroup + `"],
+		"rules": {"keywords": {"ping": "pong"}}}}}`)
+	h.pass()
+
+	if sends := h.sender.all(); len(sends) != 0 {
+		t.Fatalf("sends = %v, want none", sends)
+	}
+	h.log.wantLine(t, "outcome=route_missing", "id=3A34", "route=main", "matched_via=lid_map")
+	h.log.wantLine(t, "outcome=route_missing", "id=3A35", "route=main", "mentioned_as=lid")
+	h.wantNothingOpen()
+
+	// The record stays: a repeated delivery is not answered either.
+	h.receive(h.privateText("3A34", "ping"))
+	h.log.wantLine(t, "outcome=duplicate", "id=3A34")
+}
+
+// A message saved by a version without routes has none, and closes the same
+// way.
+func TestWorkerClosesMessagesSavedWithoutARoute(t *testing.T) {
+	h := newHarness(t, testConfig)
+	content, _ := encode(savedMessage{Text: "ping", Recognized: []string{"matched_via", "sender_alt"}})
+	if _, err := h.st.Save(context.Background(), state.Incoming{
+		Chat: lidJID(allowedLID).String(), MessageID: "3A36", Sent: h.clock(), Received: h.clock(), Content: content,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h.pass()
+	if sends := h.sender.all(); len(sends) != 0 {
+		t.Fatalf("sends = %v, want none", sends)
+	}
+	h.log.wantLine(t, "outcome=route_missing", "id=3A36", `route=""`)
 	h.wantNothingOpen()
 }
 
@@ -244,7 +339,7 @@ func TestWorkerResendsTheStoredReplyAfterARestart(t *testing.T) {
 	h.pass()
 	first := h.sender.all()[0]
 
-	h.restart(`{"keywords": {"ping": "otra respuesta"}, "allowed_people": ["` + allowedPhone + `"]}`)
+	h.restart(`{"routes": {"main": {"people": ["` + allowedPhone + `"], "rules": {"keywords": {"ping": "otra respuesta"}}}}}`)
 	h.advance(retryWaits[0])
 	h.pass()
 
@@ -257,6 +352,26 @@ func TestWorkerResendsTheStoredReplyAfterARestart(t *testing.T) {
 			sends[1].msg.GetConversation(), sends[1].id, "pong", first.id)
 	}
 	h.log.wantLine(t, "outcome=replied", "id=3A0C", "keyword=ping", "attempt=2")
+}
+
+// A reply already built goes out even if its route is gone after the
+// restart: it may have been sent before the process died.
+func TestWorkerResendsTheStoredReplyWithoutItsRoute(t *testing.T) {
+	h := newHarness(t, testConfig)
+	h.sender.errs = []error{whatsmeow.ErrMessageTimedOut}
+	h.receive(h.privateText("3A0G", "ping"))
+	h.pass()
+	first := h.sender.all()[0]
+
+	h.restart(`{"routes": {"otra": {"people": ["` + allowedPhone + `"], "rules": {"keywords": {"ping": "otra respuesta"}}}}}`)
+	h.advance(retryWaits[0])
+	h.pass()
+
+	sends := h.sender.all()
+	if len(sends) != 2 || sends[1].id != first.id || sends[1].msg.GetConversation() != "pong" {
+		t.Fatalf("sends = %v, want the stored reply again with id %q", sends, first.id)
+	}
+	h.log.wantLine(t, "outcome=replied", "id=3A0G", "route=main", "attempt=2")
 }
 
 // Once nothing is due, the WAL is truncated: the content of the closed
@@ -370,7 +485,7 @@ func TestWorkerClosesUnusableMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A new message whose stored quote is not protobuf.
-	saved, _ := encode(savedMessage{Group: true, Text: " ping", Quote: []byte{0xff, 0xff}})
+	saved, _ := encode(savedMessage{Route: "main", Group: true, Text: " ping", Quote: []byte{0xff, 0xff}})
 	if _, err := h.st.Save(context.Background(), state.Incoming{
 		Chat: enabledGroup, MessageID: "3A12", Sent: h.clock(), Received: h.clock(), Content: saved,
 	}); err != nil {

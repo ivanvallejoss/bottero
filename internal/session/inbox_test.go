@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -41,7 +42,7 @@ func TestInboxSavesAPrivateMessage(t *testing.T) {
 	if h.wakes != 1 {
 		t.Errorf("worker woken %d times, want 1", h.wakes)
 	}
-	h.log.wantLine(t, "outcome=queued", "id=3A01", "matched_via=lid_map")
+	h.log.wantLine(t, "outcome=queued", "id=3A01", "route=main", "matched_via=lid_map")
 
 	j := h.openJob()
 	if j.Chat != lidJID(allowedLID).String() || j.MessageID != "3A01" {
@@ -54,8 +55,9 @@ func TestInboxSavesAPrivateMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Only what Answer and the log need: no phone number, no quote.
-	want := savedMessage{Text: "ping", Recognized: []string{"matched_via", "lid_map"}}
+	// Only what Answer and the log need: the route, but no phone number and
+	// no quote.
+	want := savedMessage{Route: "main", Text: "ping", Recognized: []string{"matched_via", "lid_map"}}
 	if !reflect.DeepEqual(saved, want) {
 		t.Errorf("saved content = %+v, want %+v", saved, want)
 	}
@@ -65,13 +67,13 @@ func TestInboxSavesAGroupMessageWithItsQuote(t *testing.T) {
 	h := newHarness(t, testConfig)
 	evt := h.groupTag(enabledGroup, "3A02", "ping")
 	h.receive(evt)
-	h.log.wantLine(t, "outcome=queued", "id=3A02", "mentioned_as=lid")
+	h.log.wantLine(t, "outcome=queued", "id=3A02", "route=main", "mentioned_as=lid")
 
 	saved, err := decodeSaved(h.openJob().Content)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !saved.Group || saved.Text != " ping" {
+	if !saved.Group || saved.Text != " ping" || saved.Route != "main" {
 		t.Errorf("saved content = %+v", saved)
 	}
 	// The author of the quote goes without the device number.
@@ -106,9 +108,11 @@ func TestInboxDoesNotSaveWhatTheBotDoesNotAttend(t *testing.T) {
 	}
 
 	if !h.in.handle(h.groupTag(disabledGroup, "3A13", "ping")) {
-		t.Error("tag in a group not enabled: handle = false")
+		t.Error("tag in a group in no route: handle = false")
 	}
-	h.log.wantLine(t, "outcome=group_not_enabled", "id=3A13")
+	if line := h.log.wantLine(t, "outcome=no_route", "id=3A13", "mentioned_as=lid"); strings.Contains(line, "route=") {
+		t.Errorf("no_route line names a route: %s", line)
+	}
 	h.wantNothingOpen()
 	if h.wakes != 0 {
 		t.Errorf("worker woken %d times, want 0", h.wakes)
