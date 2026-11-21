@@ -56,7 +56,19 @@ func OpenStore(ctx context.Context, dataDir string, log waLog.Logger) (*sqlstore
 // crash or restart of the process; a power cut can roll back the last commits
 // that the system had not yet written to disk. The state database keeps
 // synchronous(FULL) for the reason given in the state package.
+//
+// secure_delete(1): what SQLite deletes is overwritten with zeros in the
+// database file. whatsmeow keeps the plaintext of every message it decrypts,
+// from any chat, in its event buffer until the handlers finish; then it sets
+// the plaintext to NULL and keeps only a hash for 14 days, to recognize a
+// repeated delivery. Without secure_delete the old bytes stayed in the page's
+// free space, or in the overflow pages it freed. On the homelab its cost does
+// not show: in two runs of TestSessionBufferWrites, the medians with and
+// without it differed by tens of µs, either way. The WAL still
+// keeps copies of those pages until later writes overwrite them, or until the
+// last connection closes and SQLite removes it.
 func sessionDSN(dataDir string) string {
 	return "file:" + filepath.Join(dataDir, sessionDBFile) +
-		"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_txlock=immediate"
+		"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)" +
+		"&_pragma=secure_delete(1)&_txlock=immediate"
 }

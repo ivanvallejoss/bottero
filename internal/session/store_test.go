@@ -63,6 +63,7 @@ func TestSessionDSNSettings(t *testing.T) {
 		{"busy_timeout", "5000"},
 		{"journal_mode", "wal"},
 		{"synchronous", "1"}, // NORMAL
+		{"secure_delete", "1"},
 	}
 	for _, tt := range tests {
 		var got string
